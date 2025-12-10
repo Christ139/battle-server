@@ -1,0 +1,48 @@
+name: Deploy battle-server to VPS
+
+on:
+  push:
+    branches:
+      - main   # change if your default branch is different
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e  # Exit on any error
+
+            echo "=== Starting battle-server deployment ==="
+
+            cd /srv/battle-server
+
+            echo "=== Pulling latest code ==="
+            git pull origin main
+
+            echo "=== Installing dependencies ==="
+            # use ci if you like, fall back to install if package-lock changes often
+            npm ci --omit=dev || npm install --omit=dev
+
+            echo "=== Checking PM2 process ==="
+            if pm2 describe battle-server > /dev/null 2>&1; then
+              echo "=== Reloading PM2 process ==="
+              pm2 reload battle-server --update-env
+            else
+              echo "=== Starting PM2 process for first time ==="
+              pm2 start server.js --name battle-server
+              pm2 save
+            fi
+
+            echo "=== Deployment complete ==="
+            pm2 list || true
