@@ -87,7 +87,17 @@ io.on('connection', (socket) => {
     // Ack back to world
     socket.emit('battle:started', { battleId, systemId });
   });
+    socket.on('battle:test', (payload, ack) => {
+    console.log('[BattleServer] battle:test received:', payload);
 
+    if (typeof ack === 'function') {
+      ack({
+        success: true,
+        echo: payload,
+        message: 'Battle server received your test payload.',
+      });
+    }
+  });
   // World sends commands for units in a system
   socket.on('battle:commands', ({ systemId, commands }) => {
     const sysId = String(systemId);
