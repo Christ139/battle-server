@@ -1,8 +1,13 @@
-// server.js - Battle Server (separate service from game-server)
-//Test
+/**
+ * Server.js - Battle Server with Rust WASM Integration
+ * 
+ * Handles real-time battle simulation using high-performance Rust WASM core
+ */
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const BattleManager = require('./BattleManager');
 
 const app = express();
 app.use(express.json());
@@ -10,167 +15,169 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*', // world/game-server will connect from another host/port
+    origin: '*',
   },
 });
 
-// ---------------------------
-// In-memory battle state
-// ---------------------------
+// Initialize Battle Manager
+const battleManager = new BattleManager(io);
 
-/**
- * systems Map structure:
- * key: systemId (string/number)
- * value: {
- *   battleId: string,
- *   tick: number,
- *   units: Array<...>,      // raw state sent by game-server
- *   lastUpdate: number,     // Date.now()
- *   commandQueue: Array<...>
- * }
- */
-const systems = new Map();
-
-// ---------------------------
-// Simple healthcheck
-// ---------------------------
-
+// Health check
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'battle-server' });
+  res.json({ 
+    ok: true, 
+    service: 'battle-server',
+    activeBattles: battleManager.getActiveBattles().length,
+    uptime: process.uptime()
+  });
 });
 
-// Optional HTTP-style start (you can use this for quick tests with curl/postman)
+// Start battle via HTTP (for testing)
 app.post('/battle/start', (req, res) => {
   const { battleId, systemId, units } = req.body;
 
   if (!battleId || !systemId || !Array.isArray(units)) {
-    return res.status(400).json({ ok: false, error: 'Missing battleId/systemId/units' });
+    return res.status(400).json({ 
+      ok: false, 
+      error: 'Missing battleId, systemId, or units array' 
+    });
   }
 
-  systems.set(String(systemId), {
-    battleId: String(battleId),
-    tick: 0,
-    units,
-    lastUpdate: Date.now(),
-    commandQueue: [],
-  });
-
-  console.log('[Battle] HTTP start', battleId, 'system', systemId, 'units:', units.length);
-
-  res.json({ ok: true });
+  const result = battleManager.startBattle(battleId, systemId, units);
+  
+  if (result.success) {
+    res.json({ ok: true, battleId: result.battleId });
+  } else {
+    res.status(500).json({ ok: false, error: result.error });
+  }
 });
 
-// ---------------------------
-// Socket.IO – world-server connects as a client
-// ---------------------------
+// Get battle status via HTTP
+app.get('/battle/status/:battleId', (req, res) => {
+  const { battleId } = req.params;
+  const status = battleManager.getBattleStatus(battleId);
+  
+  if (status.found) {
+    res.json({ ok: true, ...status });
+  } else {
+    res.status(404).json({ ok: false, error: 'Battle not found' });
+  }
+});
 
+// Get all active battles
+app.get('/battles/active', (req, res) => {
+  const active = battleManager.getActiveBattles();
+  res.json({ ok: true, count: active.length, battles: active });
+});
+
+// Stop battle via HTTP
+app.post('/battle/stop/:battleId', (req, res) => {
+  const { battleId } = req.params;
+  const result = battleManager.stopBattle(battleId);
+  
+  if (result.success) {
+    res.json({ ok: true });
+  } else {
+    res.status(404).json({ ok: false, error: result.error });
+  }
+});
+
+// Socket.IO - game-server connects as a client
 io.on('connection', (socket) => {
-  console.log('[Battle] world connected', socket.id);
+  console.log('[Battle] Client connected:', socket.id);
 
-  // World tells us to start a battle
-  socket.on('battle:start', ({ battleId, systemId, units }) => {
+  // Start battle via Socket.IO
+  socket.on('battle:start', ({ battleId, systemId, units }, callback) => {
     if (!battleId || !systemId || !Array.isArray(units)) {
-      console.warn('[Battle] invalid battle:start payload', { battleId, systemId });
+      console.warn('[Battle] Invalid battle:start payload');
+      if (callback) callback({ success: false, error: 'Invalid payload' });
       return;
     }
 
-    systems.set(String(systemId), {
-      battleId: String(battleId),
-      tick: 0,
-      units,
-      lastUpdate: Date.now(),
-      commandQueue: [],
-    });
-
-    console.log('[Battle] start via socket', battleId, 'system', systemId, 'units:', units.length);
-
-    // Ack back to world
-    socket.emit('battle:started', { battleId, systemId });
+    const result = battleManager.startBattle(battleId, systemId, units);
+    
+    if (callback) callback(result);
+    
+    // Auto-join client to system room for updates
+    socket.join(`system:${systemId}`);
   });
-    socket.on('battle:test', (payload, ack) => {
-    console.log('[BattleServer] battle:test received:', payload);
 
-    if (typeof ack === 'function') {
-      ack({
+  // Add reinforcements mid-battle
+  socket.on('battle:reinforcements', ({ battleId, units }, callback) => {
+    const result = battleManager.addReinforcements(battleId, units);
+    if (callback) callback(result);
+  });
+
+  // Get battle status
+  socket.on('battle:status', ({ battleId }, callback) => {
+    const status = battleManager.getBattleStatus(battleId);
+    if (callback) callback(status);
+  });
+
+  // Stop battle
+  socket.on('battle:stop', ({ battleId }, callback) => {
+    const result = battleManager.stopBattle(battleId);
+    if (callback) callback(result);
+  });
+
+  // Join system room for battle updates
+  socket.on('battle:subscribe', ({ systemId }) => {
+    socket.join(`system:${systemId}`);
+    console.log(`[Battle] Socket ${socket.id} subscribed to system ${systemId}`);
+  });
+
+  // Leave system room
+  socket.on('battle:unsubscribe', ({ systemId }) => {
+    socket.leave(`system:${systemId}`);
+    console.log(`[Battle] Socket ${socket.id} unsubscribed from system ${systemId}`);
+  });
+
+  // Test connection
+  socket.on('battle:test', (payload, callback) => {
+    console.log('[Battle] Test received:', payload);
+    if (callback) {
+      callback({
         success: true,
         echo: payload,
-        message: 'Battle server received your test payload.',
+        message: 'Battle server (WASM) operational',
+        activeBattles: battleManager.getActiveBattles().length
       });
     }
-  });
-  // World sends commands for units in a system
-  socket.on('battle:commands', ({ systemId, commands }) => {
-    const sysId = String(systemId);
-    const sys = systems.get(sysId);
-    if (!sys) {
-      console.warn('[Battle] commands for unknown system', sysId);
-      return;
-    }
-
-    if (!Array.isArray(commands)) {
-      console.warn('[Battle] commands payload not array for system', sysId);
-      return;
-    }
-
-    sys.commandQueue.push(...commands);
-    sys.lastUpdate = Date.now();
   });
 
   socket.on('disconnect', () => {
-    console.log('[Battle] world disconnected', socket.id);
-    // NOTE: we do NOT clear systems here – they are independent of socket connection.
-    // World-server can reconnect and continue using existing systems map.
+    console.log('[Battle] Client disconnected:', socket.id);
   });
 });
 
-// ---------------------------
-// Basic tick loop (stub)
-// ---------------------------
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('[Battle] SIGTERM received, shutting down gracefully...');
+  battleManager.shutdown();
+  server.close(() => {
+    console.log('[Battle] Server closed');
+    process.exit(0);
+  });
+});
 
-/**
- * This is a very simple global tick loop.
- * Later we’ll replace this with your real combat logic.
- */
-const TICK_INTERVAL_MS = 250; // 4 ticks per second (example)
+process.on('SIGINT', () => {
+  console.log('[Battle] SIGINT received, shutting down gracefully...');
+  battleManager.shutdown();
+  server.close(() => {
+    console.log('[Battle] Server closed');
+    process.exit(0);
+  });
+});
 
-setInterval(() => {
-  const now = Date.now();
-
-  for (const [systemId, sys] of systems.entries()) {
-    sys.tick += 1;
-
-    // TODO: apply sys.commandQueue to sys.units
-    // TODO: movement, DPS, death checks, etc.
-    sys.commandQueue.length = 0; // clear for now
-
-    sys.lastUpdate = now;
-
-    // For now, just emit the raw units back as a snapshot
-    io.emit('battle:snapshot', {
-      battleId: sys.battleId,
-      systemId,
-      tick: sys.tick,
-      units: sys.units,
-    });
-
-    // Example: stub event every 20 ticks (just to see traffic)
-    if (sys.tick % 20 === 0) {
-      io.emit('battle:event', {
-        battleId: sys.battleId,
-        systemId,
-        type: 'tickCheckpoint',
-        tick: sys.tick,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  }
-}, TICK_INTERVAL_MS);
-
-// ---------------------------
 // Start server
-// ---------------------------
-
 const PORT = process.env.PORT || 4100;
 server.listen(PORT, () => {
-  console.log(`battle-server listening on port ${PORT}`);
+  console.log(`╔══════════════════════════════════════════════════════════╗`);
+  console.log(`║        🚀 BATTLE SERVER (RUST WASM) STARTED             ║`);
+  console.log(`╠══════════════════════════════════════════════════════════╣`);
+  console.log(`║  Port:           ${String(PORT).padEnd(38)} ║`);
+  console.log(`║  Tick Rate:      50ms (20 ticks/sec)${' '.repeat(19)} ║`);
+  console.log(`║  Engine:         Rust + WebAssembly${' '.repeat(20)} ║`);
+  console.log(`║  Max Capacity:   10,000+ units per battle${' '.repeat(14)} ║`);
+  console.log(`╚══════════════════════════════════════════════════════════╝`);
 });
