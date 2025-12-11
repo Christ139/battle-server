@@ -16,7 +16,7 @@ const server = http.createServer(app);
 // INCREASED BUFFER SIZES FOR LARGE BATTLES
 const io = new Server(server, {
   cors: { origin: '*' },
-  maxHttpBufferSize: 10e6,    // 10MB
+  maxHttpBufferSize: 20e6,    // 10MB
   pingTimeout: 60000,
   pingInterval: 25000
 });
