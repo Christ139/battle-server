@@ -88,22 +88,50 @@ io.on('connection', (socket) => {
 
   // Start battle via Socket.IO
   socket.on('battle:start', ({ battleId, systemId, units }, callback) => {
+    console.log(`[Battle] ⚡ Received battle:start event`);
+    console.log(`[Battle]    Battle ID: ${battleId}`);
+    console.log(`[Battle]    System ID: ${systemId}`);
+    console.log(`[Battle]    Units: ${units?.length || 0}`);
+    console.log(`[Battle]    Has callback: ${!!callback}`);
+    
     if (!battleId || !systemId || !Array.isArray(units)) {
-      console.warn('[Battle] Invalid battle:start payload');
+      console.warn('[Battle] ❌ Invalid battle:start payload');
       if (callback) callback({ success: false, error: 'Invalid payload' });
       return;
     }
 
-    const result = battleManager.startBattle(battleId, systemId, units);
+    console.log(`[Battle] 🎮 Calling battleManager.startBattle with ${units.length} units...`);
     
-    if (callback) callback(result);
-    
-    // Auto-join client to system room for updates
-    socket.join(`system:${systemId}`);
+    try {
+      const startTime = Date.now();
+      const result = battleManager.startBattle(battleId, systemId, units);
+      const elapsed = Date.now() - startTime;
+      
+      console.log(`[Battle] ✅ Battle started in ${elapsed}ms`);
+      console.log(`[Battle]    Success: ${result.success}`);
+      console.log(`[Battle]    Message: ${result.message || 'N/A'}`);
+      
+      if (callback) {
+        console.log(`[Battle] 📡 Sending success callback to client...`);
+        callback(result);
+      }
+      
+      // Auto-join client to system room for updates
+      socket.join(`system:${systemId}`);
+      console.log(`[Battle] 📺 Socket joined room: system:${systemId}`);
+      
+    } catch (error) {
+      console.error('[Battle] ❌ ERROR starting battle:', error.message);
+      console.error('[Battle] Stack trace:', error.stack);
+      if (callback) {
+        callback({ success: false, error: error.message });
+      }
+    }
   });
 
   // Add reinforcements mid-battle
   socket.on('battle:reinforcements', ({ battleId, units }, callback) => {
+    console.log(`[Battle] Reinforcements for ${battleId}: ${units?.length} units`);
     const result = battleManager.addReinforcements(battleId, units);
     if (callback) callback(result);
   });
@@ -116,6 +144,7 @@ io.on('connection', (socket) => {
 
   // Stop battle
   socket.on('battle:stop', ({ battleId }, callback) => {
+    console.log(`[Battle] 🛑 Stop requested for ${battleId}`);
     const result = battleManager.stopBattle(battleId);
     if (callback) callback(result);
   });
