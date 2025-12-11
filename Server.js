@@ -1,6 +1,6 @@
 /**
  * Server.js - Battle Server with Rust WASM Integration
- * WITH CALLBACK DEBUGGING
+ * FIX: Use events instead of callbacks for large payloads
  */
 
 const express = require('express');
@@ -13,7 +13,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// INCREASED BUFFER SIZES FOR LARGE BATTLES (1,000+ units)
+// INCREASED BUFFER SIZES FOR LARGE BATTLES
 const io = new Server(server, {
   cors: { origin: '*' },
   maxHttpBufferSize: 10e6,    // 10MB
@@ -77,17 +77,14 @@ app.post('/battle/stop/:battleId', (req, res) => {
 io.on('connection', (socket) => {
   console.log('[Battle] Client connected:', socket.id);
 
+  // FIX: Use event-based response for large payloads
   socket.on('battle:start', ({ battleId, systemId, units }, callback) => {
     console.log(`[Battle] ⚡ Received battle:start - ${units?.length || 0} units`);
-    console.log(`[Battle] 🔍 Callback provided: ${!!callback}`);
-    console.log(`[Battle] 🔍 Callback type: ${typeof callback}`);
     
     if (!battleId || !systemId || !Array.isArray(units)) {
       console.warn('[Battle] ❌ Invalid payload');
-      if (callback) {
-        console.log('[Battle] 📡 Calling callback with error...');
-        callback({ success: false, error: 'Invalid payload' });
-      }
+      // Still use callback for errors (small payload)
+      if (callback) callback({ success: false, error: 'Invalid payload' });
       return;
     }
 
@@ -98,37 +95,31 @@ io.on('connection', (socket) => {
       const result = battleManager.startBattle(battleId, systemId, units);
       const elapsed = Date.now() - startTime;
       
-      console.log(`[Battle] ✅ Battle started in ${elapsed}ms`);
-      console.log(`[Battle] 🔍 Result object:`, result);
-      console.log(`[Battle] 🔍 Result.success: ${result.success}`);
-      console.log(`[Battle] 🔍 Result.battleId: ${result.battleId}`);
-      console.log(`[Battle] 🔍 Result type: ${typeof result}`);
-      console.log(`[Battle] 🔍 Result is null: ${result === null}`);
-      console.log(`[Battle] 🔍 Result is undefined: ${result === undefined}`);
+      console.log(`[Battle] ✅ Battle started in ${elapsed}ms - Success: ${result.success}`);
       
+      // FIX: For large payloads, emit response as separate event
+      // This avoids Socket.IO callback limitations with large initial payloads
+      socket.emit('battle:start:response', result);
+      console.log(`[Battle] 📡 Emitted battle:start:response event`);
+      
+      // Also call callback for backwards compatibility (but it may be null)
       if (callback) {
-        console.log(`[Battle] 📡 Calling callback with result...`);
-        console.log(`[Battle] 📡 About to send:`, JSON.stringify(result));
-        
-        try {
-          callback(result);
-          console.log(`[Battle] ✅ Callback called successfully`);
-        } catch (cbError) {
-          console.error(`[Battle] ❌ Error calling callback:`, cbError);
-        }
-      } else {
-        console.warn(`[Battle] ⚠️  No callback provided!`);
+        setImmediate(() => {
+          try {
+            callback(result);
+            console.log(`[Battle] 📞 Also called callback`);
+          } catch (err) {
+            console.error(`[Battle] ⚠️  Callback error (expected with large payloads):`, err.message);
+          }
+        });
       }
       
       socket.join(`system:${systemId}`);
-      console.log(`[Battle] 📺 Socket joined room: system:${systemId}`);
       
     } catch (error) {
       console.error('[Battle] ❌ Error:', error.message);
-      console.error('[Battle] Stack:', error.stack);
-      if (callback) {
-        callback({ success: false, error: error.message });
-      }
+      socket.emit('battle:start:response', { success: false, error: error.message });
+      if (callback) callback({ success: false, error: error.message });
     }
   });
 

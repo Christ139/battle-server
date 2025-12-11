@@ -1,5 +1,6 @@
 /**
- * Stress Test - 1,000 Units (with better error handling)
+ * Stress Test - 1,000 Units (EVENT-BASED)
+ * Uses event listener instead of callback for large payloads
  */
 
 const io = require('socket.io-client');
@@ -29,7 +30,7 @@ const metrics = {
 
 async function runStressTest() {
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║           BATTLE STRESS TEST - 1,000 UNITS              ║');
+  console.log('║      BATTLE STRESS TEST - 1,000 UNITS (EVENT-BASED)    ║');
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 
   console.log('📡 Step 1: Loading units from database...');
@@ -74,35 +75,18 @@ async function runStressTest() {
 
   const battleId = `stress_test_${Date.now()}`;
   
-  console.log('⏳ Sending large payload (this may take 5-10 seconds)...\n');
+  console.log('⏳ Sending large payload...\n');
   
   const emitStart = Date.now();
   
-  socket.emit('battle:start', {
-    battleId,
-    systemId: SYSTEM_ID,
-    units
-  }, (response) => {
+  // Listen for event-based response
+  socket.once('battle:start:response', (response) => {
     const emitElapsed = Date.now() - emitStart;
     
-    console.log(`📊 Response received after ${emitElapsed}ms\n`);
-    
-    // Handle null/undefined response
-    if (!response) {
-      console.error('❌ ERROR: Server returned null/undefined response!');
-      console.error('   This usually means:');
-      console.error('   1. Battle-server crashed during initialization');
-      console.error('   2. WASM memory error');
-      console.error('   3. Unit data format issue\n');
-      console.error('Check battle-server logs with: pm2 logs battle-server\n');
-      cleanup();
-      process.exit(1);
-      return;
-    }
-    
+    console.log(`📊 Response received via EVENT after ${emitElapsed}ms\n`);
     console.log(`   Success: ${response.success}`);
-    console.log(`   Error: ${response.error || 'none'}`);
-    console.log(`   Message: ${response.message || 'N/A'}\n`);
+    console.log(`   Battle ID: ${response.battleId}`);
+    console.log(`   Error: ${response.error || 'none'}\n`);
     
     if (response && response.success) {
       console.log('✅ Battle started successfully!\n');
@@ -158,10 +142,16 @@ async function runStressTest() {
     } else {
       console.error('❌ FAILED TO START BATTLE');
       console.error(`   Error: ${response?.error || 'Unknown'}\n`);
-      console.error('Check battle-server logs with: pm2 logs battle-server\n');
       cleanup();
       process.exit(1);
     }
+  });
+  
+  // Emit the battle:start event (callback will be null/ignored)
+  socket.emit('battle:start', {
+    battleId,
+    systemId: SYSTEM_ID,
+    units
   });
 
   function printResults() {
