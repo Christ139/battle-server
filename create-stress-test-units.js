@@ -1,11 +1,6 @@
 /**
  * Create 5,000 test units for battle stress test
- * 
- * Creates:
- * - 2,500 units for Faction A (player 9001)
- * - 2,500 units for Faction B (player 9002)
- * - All in same system for massive battle
- * - All equipped with weapons
+ * FIXED: Uses correct Units table schema
  */
 
 const { Pool } = require('pg');
@@ -19,11 +14,10 @@ const pool = new Pool({
   ssl: false
 });
 
-const SYSTEM_ID = 9999999; // Test system ID
+const SYSTEM_ID = 9999999;
 const FACTION_A_PLAYER = 9001;
 const FACTION_B_PLAYER = 9002;
 const UNITS_PER_FACTION = 2500;
-const TOTAL_UNITS = UNITS_PER_FACTION * 2;
 
 async function createStressTestUnits() {
   console.log('╔══════════════════════════════════════════════════════════╗');
@@ -35,7 +29,7 @@ async function createStressTestUnits() {
   try {
     await client.query('BEGIN');
 
-    // Step 1: Create test players if they don't exist
+    // Step 1: Create test players
     console.log('📋 Step 1: Creating test players...');
     
     await client.query(`
@@ -48,7 +42,7 @@ async function createStressTestUnits() {
     
     console.log(`✅ Created/updated test players: ${FACTION_A_PLAYER}, ${FACTION_B_PLAYER}\n`);
 
-    // Step 2: Set them as enemies
+    // Step 2: Set as enemies
     console.log('📋 Step 2: Setting players as enemies...');
     
     const playerIdA = Math.min(FACTION_A_PLAYER, FACTION_B_PLAYER);
@@ -63,7 +57,7 @@ async function createStressTestUnits() {
     
     console.log('✅ Set as enemies\n');
 
-    // Step 3: Get a template ID with weapons
+    // Step 3: Find template with weapons
     console.log('📋 Step 3: Finding template with weapons...');
     
     const templateQuery = await client.query(`
@@ -80,10 +74,7 @@ async function createStressTestUnits() {
       templateId = templateQuery.rows[0].unit_template_id;
       console.log(`✅ Using template ${templateId} with ${templateQuery.rows[0].weapon_count} weapons\n`);
     } else {
-      // Fallback to any template
-      const anyTemplate = await client.query(`
-        SELECT "TemplateID" FROM "UnitTemplates" LIMIT 1
-      `);
+      const anyTemplate = await client.query(`SELECT "TemplateID" FROM "UnitTemplates" LIMIT 1`);
       templateId = anyTemplate.rows[0].TemplateID;
       console.log(`⚠️  No armed templates found, using template ${templateId}\n`);
     }
@@ -100,30 +91,28 @@ async function createStressTestUnits() {
     
     console.log(`✅ Deleted ${deleteResult.rowCount} old test units\n`);
 
-    // Step 5: Create Faction A units
+    // Step 5: Create Faction A units (batch insert)
     console.log(`📋 Step 5: Creating ${UNITS_PER_FACTION} units for Faction A...`);
     
-    const factionAUnits = [];
+    const factionAValues = [];
     for (let i = 0; i < UNITS_PER_FACTION; i++) {
-      // Spread units in a 1000x1000 area
       const x = Math.random() * 1000 - 500;
       const y = Math.random() * 100;
       const z = Math.random() * 1000 - 500;
       
-      factionAUnits.push(`(
+      factionAValues.push(`(
         ${templateId}, 
         ${FACTION_A_PLAYER}, 
         FALSE, 
         NULL,
         'SolarSystem', 
         ${SYSTEM_ID}, 
-        NULL,
-        100, 
         100,
         ${x}, 
         ${y}, 
         ${z},
-        'Waiting For Orders'
+        'Waiting For Orders',
+        FALSE
       )`);
       
       if (i % 500 === 0 && i > 0) {
@@ -134,39 +123,38 @@ async function createStressTestUnits() {
     await client.query(`
       INSERT INTO "Units" (
         "TemplateID", "PlayerID", "IsNPC", "NPCFactionID",
-        "LocationType", "LocationID", "DockedAtUnitID",
-        "CurrentHealth", "MaxHealth",
+        "LocationType", "LocationID", 
+        "CurrentHealth",
         "PosX", "PosY", "PosZ",
-        "CurrentStatus"
-      ) VALUES ${factionAUnits.join(', ')}
+        "CurrentStatus",
+        "UnderConstruction"
+      ) VALUES ${factionAValues.join(', ')}
     `);
     
     console.log(`✅ Created ${UNITS_PER_FACTION} units for Faction A\n`);
 
-    // Step 6: Create Faction B units
+    // Step 6: Create Faction B units (batch insert)
     console.log(`📋 Step 6: Creating ${UNITS_PER_FACTION} units for Faction B...`);
     
-    const factionBUnits = [];
+    const factionBValues = [];
     for (let i = 0; i < UNITS_PER_FACTION; i++) {
-      // Spread units in a different 1000x1000 area (offset by 2000)
       const x = Math.random() * 1000 + 1500;
       const y = Math.random() * 100;
       const z = Math.random() * 1000 - 500;
       
-      factionBUnits.push(`(
+      factionBValues.push(`(
         ${templateId}, 
         ${FACTION_B_PLAYER}, 
         FALSE, 
         NULL,
         'SolarSystem', 
         ${SYSTEM_ID}, 
-        NULL,
-        100, 
         100,
         ${x}, 
         ${y}, 
         ${z},
-        'Waiting For Orders'
+        'Waiting For Orders',
+        FALSE
       )`);
       
       if (i % 500 === 0 && i > 0) {
@@ -177,11 +165,12 @@ async function createStressTestUnits() {
     await client.query(`
       INSERT INTO "Units" (
         "TemplateID", "PlayerID", "IsNPC", "NPCFactionID",
-        "LocationType", "LocationID", "DockedAtUnitID",
-        "CurrentHealth", "MaxHealth",
+        "LocationType", "LocationID", 
+        "CurrentHealth",
         "PosX", "PosY", "PosZ",
-        "CurrentStatus"
-      ) VALUES ${factionBUnits.join(', ')}
+        "CurrentStatus",
+        "UnderConstruction"
+      ) VALUES ${factionBValues.join(', ')}
     `);
     
     console.log(`✅ Created ${UNITS_PER_FACTION} units for Faction B\n`);
@@ -211,7 +200,7 @@ async function createStressTestUnits() {
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ STRESS TEST UNITS READY!');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-    console.log(`Total units: ${TOTAL_UNITS}`);
+    console.log(`Total units: ${UNITS_PER_FACTION * 2}`);
     console.log(`System ID: ${SYSTEM_ID}`);
     console.log(`Faction A: Player ${FACTION_A_PLAYER} (2,500 units)`);
     console.log(`Faction B: Player ${FACTION_B_PLAYER} (2,500 units)`);
