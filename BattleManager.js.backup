@@ -1,10 +1,8 @@
 /**
  * BattleManager.js
- *
+ * 
  * Manages battle lifecycle using Rust WASM battle core
  * Handles tick loops, unit updates, and result persistence
- * 
- * FIX: Always emit tick events (even when empty) for client performance tracking
  */
 
 const { WasmBattleSimulator } = require('./battle-core/pkg/battle_core.js');
@@ -19,7 +17,7 @@ class BattleManager {
 
   /**
    * Start a new battle
-   *
+   * 
    * @param {string} battleId - Unique battle identifier
    * @param {number} systemId - Solar system ID
    * @param {Array} units - Battle units from battle-data.service
@@ -117,16 +115,17 @@ class BattleManager {
 
         battle.tick++;
 
-        // FIX: ALWAYS emit tick events (even when empty) for client performance tracking
-        // This allows the client to measure tick rate, tick times, and know the simulation is running
-        this.io.to(`system:${battle.systemId}`).emit('battle:tick', {
-          battleId,
-          systemId: battle.systemId,
-          tick: battle.tick,
-          moved: tickResult.moved || [],
-          damaged: tickResult.damaged || [],
-          destroyed: tickResult.destroyed || []
-        });
+        // Emit delta updates to clients
+        if (tickResult.moved.length > 0 || tickResult.damaged.length > 0 || tickResult.destroyed.length > 0) {
+          this.io.to(`system:${battle.systemId}`).emit('battle:tick', {
+            battleId,
+            systemId: battle.systemId,
+            tick: battle.tick,
+            moved: tickResult.moved,
+            damaged: tickResult.damaged,
+            destroyed: tickResult.destroyed
+          });
+        }
 
         // Check if battle ended
         if (battle.simulator.is_battle_ended()) {
@@ -147,8 +146,8 @@ class BattleManager {
 
   /**
    * End a battle and get final results
-   *
-   * @param {string} battleId
+   * 
+   * @param {string} battleId 
    * @param {Error} error - Optional error if battle crashed
    */
   endBattle(battleId, error = null) {
@@ -204,8 +203,8 @@ class BattleManager {
 
   /**
    * Add reinforcements to an active battle
-   *
-   * @param {string} battleId
+   * 
+   * @param {string} battleId 
    * @param {Array} units - New units to add
    */
   addReinforcements(battleId, units) {
@@ -244,8 +243,8 @@ class BattleManager {
 
   /**
    * Get battle status
-   *
-   * @param {string} battleId
+   * 
+   * @param {string} battleId 
    */
   getBattleStatus(battleId) {
     const battle = this.battles.get(battleId);
@@ -288,8 +287,8 @@ class BattleManager {
 
   /**
    * Force stop a battle
-   *
-   * @param {string} battleId
+   * 
+   * @param {string} battleId 
    */
   stopBattle(battleId) {
     const battle = this.battles.get(battleId);
@@ -306,13 +305,13 @@ class BattleManager {
    */
   shutdown() {
     console.log('[BattleManager] Shutting down...');
-
+    
     this.stopTickLoop();
-
+    
     for (const battleId of this.battles.keys()) {
       this.endBattle(battleId);
     }
-
+    
     this.battles.clear();
     console.log('[BattleManager] Shutdown complete');
   }
