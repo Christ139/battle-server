@@ -5,6 +5,26 @@ use crate::weapons::try_fire_weapon;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+/// Get projectile speed for a weapon type (units per second)
+fn get_projectile_speed(weapon_tag: &str) -> f32 {
+    match weapon_tag {
+        "laser" | "beam" => f32::INFINITY,
+        "missile" => 300.0,
+        "torpedo" => 150.0,
+        _ => 800.0, // default projectile speed
+    }
+}
+
+/// Calculate impact time in milliseconds
+fn calculate_impact_time(distance: f32, weapon_tag: &str) -> u32 {
+    let speed = get_projectile_speed(weapon_tag);
+    if speed.is_infinite() {
+        0
+    } else {
+        (distance / speed * 1000.0) as u32
+    }
+}
+
 /// Main battle simulator
 /// 
 /// Handles all combat logic in high-performance Rust
@@ -28,6 +48,20 @@ pub struct TickResult {
     pub damaged: Vec<DamagedUnit>,
     pub destroyed: Vec<u32>,
     pub tick: u64,
+    #[serde(rename = "weaponsFired")]
+    pub weapons_fired: Vec<WeaponFired>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeaponFired {
+    #[serde(rename = "attackerId")]
+    pub attacker_id: u32,
+    #[serde(rename = "targetId")]
+    pub target_id: u32,
+    #[serde(rename = "weaponType")]
+    pub weapon_type: String,
+    #[serde(rename = "impactTime")]
+    pub impact_time: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,10 +171,11 @@ impl BattleSimulator {
 
         // 4. Combat - O(n) weapons - FIXED borrowing
         self.damage_queue.clear();
-        
+
         // Collect weapon fire data without holding borrows
-        let mut weapon_fires: Vec<(usize, usize, f32, String)> = Vec::new(); // (attacker_idx, target_idx, damage, weapon_tag)
-        
+        // (attacker_idx, target_idx, damage, weapon_tag, distance)
+        let mut weapon_fires: Vec<(usize, usize, f32, String, f32)> = Vec::new();
+
         for attacker_idx in 0..self.units.len() {
             if !self.units[attacker_idx].alive {
                 continue;
@@ -152,7 +187,7 @@ impl BattleSimulator {
             }
 
             let target_id = attacker_target_id.unwrap();
-            
+
             // Find target index
             let target_idx_opt = self.units.iter().position(|u| u.id == target_id && u.alive);
             if target_idx_opt.is_none() {
@@ -164,25 +199,36 @@ impl BattleSimulator {
             for weapon in &self.units[attacker_idx].weapons {
                 let attacker = &self.units[attacker_idx];
                 let target = &self.units[target_idx];
-                
+
                 if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time) {
-                    weapon_fires.push((attacker_idx, target_idx, damage, weapon.tag.clone()));
+                    let distance = attacker.distance(target);
+                    weapon_fires.push((attacker_idx, target_idx, damage, weapon.tag.clone(), distance));
                 }
             }
         }
 
-        // Now update weapon cooldowns and queue damage
-        for (attacker_idx, target_idx, damage, weapon_tag) in weapon_fires {
+        // Now update weapon cooldowns, queue damage, and build weapons_fired
+        let mut weapons_fired: Vec<WeaponFired> = Vec::new();
+
+        for (attacker_idx, target_idx, damage, weapon_tag, distance) in weapon_fires {
             // Update weapon cooldown
             if let Some(weapon) = self.units[attacker_idx].weapons.iter_mut().find(|w| w.tag == weapon_tag) {
                 weapon.last_fired = current_time;
             }
-            
+
             // Queue damage
             self.damage_queue.push(DamageEntry {
                 target_idx,
                 damage,
                 attacker_idx,
+            });
+
+            // Add to weapons_fired for client
+            weapons_fired.push(WeaponFired {
+                attacker_id: self.units[attacker_idx].id,
+                target_id: self.units[target_idx].id,
+                impact_time: calculate_impact_time(distance, &weapon_tag),
+                weapon_type: weapon_tag,
             });
         }
 
@@ -243,6 +289,7 @@ impl BattleSimulator {
             damaged,
             destroyed,
             tick: self.tick,
+            weapons_fired,
         }
     }
 

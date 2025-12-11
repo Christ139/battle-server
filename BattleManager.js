@@ -125,7 +125,8 @@ class BattleManager {
           tick: battle.tick,
           moved: tickResult.moved || [],
           damaged: tickResult.damaged || [],
-          destroyed: tickResult.destroyed || []
+          destroyed: tickResult.destroyed || [],
+          weaponsFired: tickResult.weaponsFired || []
         });
 
         // Check if battle ended
