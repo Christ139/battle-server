@@ -2,7 +2,6 @@ use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
 use crate::targeting::find_best_target;
 use crate::weapons::try_fire_weapon;
-use crate::movement::update_movement;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
@@ -84,54 +83,107 @@ impl BattleSimulator {
             }
         }
 
-        // 3. Movement - O(n)
+        // 3. Movement - O(n) - FIXED borrowing
         for idx in 0..self.units.len() {
             if !self.units[idx].alive {
                 continue;
             }
 
-            let target = if let Some(target_id) = self.units[idx].target_id {
-                self.units.iter().find(|u| u.id == target_id && u.alive)
+            // Get target position if exists
+            let target_pos = if let Some(target_id) = self.units[idx].target_id {
+                self.units.iter()
+                    .find(|u| u.id == target_id && u.alive)
+                    .map(|u| (u.pos_x, u.pos_y, u.pos_z))
             } else {
                 None
             };
 
-            update_movement(&mut self.units[idx], target, dt);
+            // Get optimal range
+            let optimal_range = if !self.units[idx].weapons.is_empty() {
+                self.units[idx].weapons[0].optimal_range
+            } else {
+                0.0
+            };
+
+            // Now mutably update the unit
+            let unit = &mut self.units[idx];
+            
+            if let Some((tx, ty, tz)) = target_pos {
+                let dx = tx - unit.pos_x;
+                let dy = ty - unit.pos_y;
+                let dz = tz - unit.pos_z;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                if dist > optimal_range {
+                    // Move towards target
+                    unit.move_towards(tx, ty, tz);
+                } else if dist < optimal_range * 0.8 {
+                    // Back away
+                    if dist > 0.0 {
+                        let factor = unit.max_speed / dist;
+                        unit.vel_x = dx * factor * -1.0;
+                        unit.vel_y = dy * factor * -1.0;
+                        unit.vel_z = dz * factor * -1.0;
+                    }
+                } else {
+                    // At optimal range, stop
+                    unit.stop();
+                }
+            }
+
+            // Update position
+            unit.update_position(dt);
         }
 
-        // 4. Combat - O(n) weapons
+        // 4. Combat - O(n) weapons - FIXED borrowing
         self.damage_queue.clear();
         
+        // Collect weapon fire data without holding borrows
+        let mut weapon_fires: Vec<(usize, usize, f32, String)> = Vec::new(); // (attacker_idx, target_idx, damage, weapon_tag)
+        
         for attacker_idx in 0..self.units.len() {
-            let attacker = &self.units[attacker_idx];
-            if !attacker.alive {
+            if !self.units[attacker_idx].alive {
                 continue;
             }
 
-            if let Some(target_id) = attacker.target_id {
-                if let Some(target_idx) = self.units.iter().position(|u| u.id == target_id && u.alive) {
-                    let target = &self.units[target_idx];
+            let attacker_target_id = self.units[attacker_idx].target_id;
+            if attacker_target_id.is_none() {
+                continue;
+            }
 
-                    // Try to fire weapons
-                    for weapon in &attacker.weapons {
-                        if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time) {
-                            self.damage_queue.push(DamageEntry {
-                                target_idx,
-                                damage,
-                                attacker_idx,
-                            });
+            let target_id = attacker_target_id.unwrap();
+            
+            // Find target index
+            let target_idx_opt = self.units.iter().position(|u| u.id == target_id && u.alive);
+            if target_idx_opt.is_none() {
+                continue;
+            }
+            let target_idx = target_idx_opt.unwrap();
 
-                            // Update weapon cooldown (mutable access)
-                            unsafe {
-                                let attacker_mut = &mut *(self.units.as_mut_ptr().add(attacker_idx));
-                                if let Some(weapon_mut) = attacker_mut.weapons.iter_mut().find(|w| w.tag == weapon.tag) {
-                                    weapon_mut.last_fired = current_time;
-                                }
-                            }
-                        }
-                    }
+            // Check each weapon
+            for weapon in &self.units[attacker_idx].weapons {
+                let attacker = &self.units[attacker_idx];
+                let target = &self.units[target_idx];
+                
+                if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time) {
+                    weapon_fires.push((attacker_idx, target_idx, damage, weapon.tag.clone()));
                 }
             }
+        }
+
+        // Now update weapon cooldowns and queue damage
+        for (attacker_idx, target_idx, damage, weapon_tag) in weapon_fires {
+            // Update weapon cooldown
+            if let Some(weapon) = self.units[attacker_idx].weapons.iter_mut().find(|w| w.tag == weapon_tag) {
+                weapon.last_fired = current_time;
+            }
+            
+            // Queue damage
+            self.damage_queue.push(DamageEntry {
+                target_idx,
+                damage,
+                attacker_idx,
+            });
         }
 
         // 5. Process damage queue - O(n) targets

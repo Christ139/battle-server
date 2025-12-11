@@ -3,10 +3,9 @@ mod battle_unit;
 mod simulator;
 mod targeting;
 mod weapons;
-mod movement;
 
 use wasm_bindgen::prelude::*;
-use simulator::{BattleSimulator, TickResult};
+use simulator::BattleSimulator;
 use battle_unit::BattleUnit;
 use serde_json;
 
