@@ -1,8 +1,3 @@
-/**
- * Server.js - Battle Server with Rust WASM Integration
- * 
- * Handles real-time battle simulation using high-performance Rust WASM core
- */
 
 const express = require('express');
 const http = require('http');
@@ -13,13 +8,14 @@ const app = express();
 app.use(express.json());
 
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-  },
+  cors: { origin: '*' },
+  maxHttpBufferSize: 10e6,    // 10MB (was 1MB default)
+  pingTimeout: 60000,          // 60 seconds
+  pingInterval: 25000          // 25 seconds
 });
 
-// Initialize Battle Manager
 const battleManager = new BattleManager(io);
 
 // Health check
@@ -32,19 +28,13 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Start battle via HTTP (for testing)
+// Start battle via HTTP
 app.post('/battle/start', (req, res) => {
   const { battleId, systemId, units } = req.body;
-
   if (!battleId || !systemId || !Array.isArray(units)) {
-    return res.status(400).json({ 
-      ok: false, 
-      error: 'Missing battleId, systemId, or units array' 
-    });
+    return res.status(400).json({ ok: false, error: 'Invalid payload' });
   }
-
   const result = battleManager.startBattle(battleId, systemId, units);
-  
   if (result.success) {
     res.json({ ok: true, battleId: result.battleId });
   } else {
@@ -52,11 +42,9 @@ app.post('/battle/start', (req, res) => {
   }
 });
 
-// Get battle status via HTTP
+// Get battle status
 app.get('/battle/status/:battleId', (req, res) => {
-  const { battleId } = req.params;
-  const status = battleManager.getBattleStatus(battleId);
-  
+  const status = battleManager.getBattleStatus(req.params.battleId);
   if (status.found) {
     res.json({ ok: true, ...status });
   } else {
@@ -64,17 +52,15 @@ app.get('/battle/status/:battleId', (req, res) => {
   }
 });
 
-// Get all active battles
+// Get active battles
 app.get('/battles/active', (req, res) => {
   const active = battleManager.getActiveBattles();
   res.json({ ok: true, count: active.length, battles: active });
 });
 
-// Stop battle via HTTP
+// Stop battle
 app.post('/battle/stop/:battleId', (req, res) => {
-  const { battleId } = req.params;
-  const result = battleManager.stopBattle(battleId);
-  
+  const result = battleManager.stopBattle(req.params.battleId);
   if (result.success) {
     res.json({ ok: true });
   } else {
@@ -82,93 +68,68 @@ app.post('/battle/stop/:battleId', (req, res) => {
   }
 });
 
-// Socket.IO - game-server connects as a client
+// Socket.IO handlers
 io.on('connection', (socket) => {
   console.log('[Battle] Client connected:', socket.id);
 
-  // Start battle via Socket.IO
   socket.on('battle:start', ({ battleId, systemId, units }, callback) => {
-    console.log(`[Battle] ⚡ Received battle:start event`);
-    console.log(`[Battle]    Battle ID: ${battleId}`);
-    console.log(`[Battle]    System ID: ${systemId}`);
-    console.log(`[Battle]    Units: ${units?.length || 0}`);
-    console.log(`[Battle]    Has callback: ${!!callback}`);
+    console.log(`[Battle] ⚡ Received battle:start - ${units?.length || 0} units`);
     
     if (!battleId || !systemId || !Array.isArray(units)) {
-      console.warn('[Battle] ❌ Invalid battle:start payload');
+      console.warn('[Battle] ❌ Invalid payload');
       if (callback) callback({ success: false, error: 'Invalid payload' });
       return;
     }
 
-    console.log(`[Battle] 🎮 Calling battleManager.startBattle with ${units.length} units...`);
+    console.log(`[Battle] 🎮 Starting battle with ${units.length} units...`);
     
     try {
       const startTime = Date.now();
       const result = battleManager.startBattle(battleId, systemId, units);
       const elapsed = Date.now() - startTime;
       
-      console.log(`[Battle] ✅ Battle started in ${elapsed}ms`);
-      console.log(`[Battle]    Success: ${result.success}`);
-      console.log(`[Battle]    Message: ${result.message || 'N/A'}`);
+      console.log(`[Battle] ✅ Battle started in ${elapsed}ms - Success: ${result.success}`);
       
-      if (callback) {
-        console.log(`[Battle] 📡 Sending success callback to client...`);
-        callback(result);
-      }
-      
-      // Auto-join client to system room for updates
+      if (callback) callback(result);
       socket.join(`system:${systemId}`);
-      console.log(`[Battle] 📺 Socket joined room: system:${systemId}`);
       
     } catch (error) {
-      console.error('[Battle] ❌ ERROR starting battle:', error.message);
-      console.error('[Battle] Stack trace:', error.stack);
-      if (callback) {
-        callback({ success: false, error: error.message });
-      }
+      console.error('[Battle] ❌ Error:', error.message);
+      if (callback) callback({ success: false, error: error.message });
     }
   });
 
-  // Add reinforcements mid-battle
   socket.on('battle:reinforcements', ({ battleId, units }, callback) => {
-    console.log(`[Battle] Reinforcements for ${battleId}: ${units?.length} units`);
     const result = battleManager.addReinforcements(battleId, units);
     if (callback) callback(result);
   });
 
-  // Get battle status
   socket.on('battle:status', ({ battleId }, callback) => {
     const status = battleManager.getBattleStatus(battleId);
     if (callback) callback(status);
   });
 
-  // Stop battle
   socket.on('battle:stop', ({ battleId }, callback) => {
-    console.log(`[Battle] 🛑 Stop requested for ${battleId}`);
+    console.log(`[Battle] 🛑 Stop: ${battleId}`);
     const result = battleManager.stopBattle(battleId);
     if (callback) callback(result);
   });
 
-  // Join system room for battle updates
   socket.on('battle:subscribe', ({ systemId }) => {
     socket.join(`system:${systemId}`);
-    console.log(`[Battle] Socket ${socket.id} subscribed to system ${systemId}`);
+    console.log(`[Battle] Subscribed to system ${systemId}`);
   });
 
-  // Leave system room
   socket.on('battle:unsubscribe', ({ systemId }) => {
     socket.leave(`system:${systemId}`);
-    console.log(`[Battle] Socket ${socket.id} unsubscribed from system ${systemId}`);
   });
 
-  // Test connection
   socket.on('battle:test', (payload, callback) => {
-    console.log('[Battle] Test received:', payload);
     if (callback) {
       callback({
         success: true,
         echo: payload,
-        message: 'Battle server (WASM) operational',
+        message: 'Battle server operational',
         activeBattles: battleManager.getActiveBattles().length
       });
     }
@@ -181,21 +142,15 @@ io.on('connection', (socket) => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('[Battle] SIGTERM received, shutting down gracefully...');
+  console.log('[Battle] Shutting down...');
   battleManager.shutdown();
-  server.close(() => {
-    console.log('[Battle] Server closed');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
-  console.log('[Battle] SIGINT received, shutting down gracefully...');
+  console.log('[Battle] Shutting down...');
   battleManager.shutdown();
-  server.close(() => {
-    console.log('[Battle] Server closed');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
 
 // Start server
@@ -205,8 +160,8 @@ server.listen(PORT, () => {
   console.log(`║        🚀 BATTLE SERVER (RUST WASM) STARTED             ║`);
   console.log(`╠══════════════════════════════════════════════════════════╣`);
   console.log(`║  Port:           ${String(PORT).padEnd(38)} ║`);
+  console.log(`║  Buffer Size:    10 MB (for large battles)${' '.repeat(13)} ║`);
   console.log(`║  Tick Rate:      50ms (20 ticks/sec)${' '.repeat(19)} ║`);
   console.log(`║  Engine:         Rust + WebAssembly${' '.repeat(20)} ║`);
-  console.log(`║  Max Capacity:   10,000+ units per battle${' '.repeat(14)} ║`);
   console.log(`╚══════════════════════════════════════════════════════════╝`);
 });
