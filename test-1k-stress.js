@@ -1,6 +1,5 @@
 /**
- * Stress Test - 1,000 Units
- * Tests battle system with real database units
+ * Stress Test - 1,000 Units (with better error handling)
  */
 
 const io = require('socket.io-client');
@@ -16,7 +15,7 @@ const pool = new Pool({
 });
 
 const SYSTEM_ID = 9999999;
-const TEST_DURATION_MS = 60000; // 1 minute
+const TEST_DURATION_MS = 60000;
 
 const metrics = {
   tickCount: 0,
@@ -33,7 +32,6 @@ async function runStressTest() {
   console.log('║           BATTLE STRESS TEST - 1,000 UNITS              ║');
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 
-  // Load units
   console.log('📡 Step 1: Loading units from database...');
   const { fetchBattleUnitsData } = require('/srv/game-server/src/services/battle-data.service');
   const units = await fetchBattleUnitsData(SYSTEM_ID, pool);
@@ -46,13 +44,12 @@ async function runStressTest() {
   console.log(`   Factions: ${factions.join(' vs ')}`);
   console.log(`   Armed units: ${armedUnits.length}\n`);
 
-  // Connect with increased timeouts
   console.log('📡 Step 2: Connecting to battle server...');
   const socket = io('http://localhost:4100', {
     transports: ['websocket'],
     reconnection: false,
-    timeout: 60000,      // 60 second connection timeout
-    ackTimeout: 60000    // 60 second ack timeout
+    timeout: 60000,
+    ackTimeout: 60000
   });
 
   await new Promise((resolve, reject) => {
@@ -69,7 +66,6 @@ async function runStressTest() {
     setTimeout(() => reject(new Error('Connection timeout')), 10000);
   });
 
-  // Start battle
   console.log('🎮 Step 3: Starting battle...');
   console.log(`   System: ${SYSTEM_ID}`);
   console.log(`   Units: ${units.length}`);
@@ -89,7 +85,21 @@ async function runStressTest() {
   }, (response) => {
     const emitElapsed = Date.now() - emitStart;
     
-    console.log(`📊 Response received after ${emitElapsed}ms`);
+    console.log(`📊 Response received after ${emitElapsed}ms\n`);
+    
+    // Handle null/undefined response
+    if (!response) {
+      console.error('❌ ERROR: Server returned null/undefined response!');
+      console.error('   This usually means:');
+      console.error('   1. Battle-server crashed during initialization');
+      console.error('   2. WASM memory error');
+      console.error('   3. Unit data format issue\n');
+      console.error('Check battle-server logs with: pm2 logs battle-server\n');
+      cleanup();
+      process.exit(1);
+      return;
+    }
+    
     console.log(`   Success: ${response.success}`);
     console.log(`   Error: ${response.error || 'none'}`);
     console.log(`   Message: ${response.message || 'N/A'}\n`);
@@ -104,7 +114,6 @@ async function runStressTest() {
       let ticksThisSecond = 0;
       let lastSecondReport = Date.now();
 
-      // Listen for ticks
       socket.on('battle:tick', (data) => {
         const now = Date.now();
         const tickDuration = now - lastTickTime;
@@ -117,7 +126,6 @@ async function runStressTest() {
         if (data.damaged) metrics.damageEvents += data.damaged.length;
         if (data.destroyed) metrics.destroyedUnits += data.destroyed.length;
         
-        // Report every second
         if (now - lastSecondReport >= 1000) {
           const elapsed = Math.floor((now - metrics.startTime) / 1000);
           const avgTickTime = metrics.tickTimes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, metrics.tickTimes.length);
@@ -138,7 +146,6 @@ async function runStressTest() {
         cleanup();
       });
 
-      // Run for specified duration
       setTimeout(() => {
         if (!metrics.endTime) {
           console.log('\n\n⏱️  Test duration reached\n');
@@ -151,6 +158,7 @@ async function runStressTest() {
     } else {
       console.error('❌ FAILED TO START BATTLE');
       console.error(`   Error: ${response?.error || 'Unknown'}\n`);
+      console.error('Check battle-server logs with: pm2 logs battle-server\n');
       cleanup();
       process.exit(1);
     }
@@ -193,10 +201,8 @@ async function runStressTest() {
     } else if (avgTickRate >= 15) {
       console.log('⚠️  STRESS TEST ACCEPTABLE');
       console.log('   System handles 1,000 units adequately');
-      console.log('   Consider optimization for better performance');
     } else {
       console.log('❌ STRESS TEST NEEDS OPTIMIZATION');
-      console.log('   System struggles with 1,000 units');
     }
     
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -205,7 +211,6 @@ async function runStressTest() {
   function cleanup() {
     socket.close();
     pool.end();
-    process.exit(0);
   }
 }
 
