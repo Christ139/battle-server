@@ -21,7 +21,7 @@ const pool = new Pool({
 
 // Battle server config
 const BATTLE_SERVER_URL = process.env.BATTLE_SERVER_URL || 'http://localhost:4100';
-const SYSTEM_ID = parseInt(process.argv[7]) || 9008810;
+const SYSTEM_ID = parseInt(process.argv[7]) || 2244677;
 
 async function test() {
   console.log('╔══════════════════════════════════════════════════════════╗');
