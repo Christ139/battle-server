@@ -1,5 +1,6 @@
 /**
  * Server.js - Battle Server with Rust WASM Integration
+ * WITH CALLBACK DEBUGGING
  */
 
 const express = require('express');
@@ -15,9 +16,9 @@ const server = http.createServer(app);
 // INCREASED BUFFER SIZES FOR LARGE BATTLES (1,000+ units)
 const io = new Server(server, {
   cors: { origin: '*' },
-  maxHttpBufferSize: 10e6,    // 10MB (default is 1MB)
-  pingTimeout: 60000,          // 60 seconds
-  pingInterval: 25000          // 25 seconds
+  maxHttpBufferSize: 10e6,    // 10MB
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 const battleManager = new BattleManager(io);
@@ -78,10 +79,15 @@ io.on('connection', (socket) => {
 
   socket.on('battle:start', ({ battleId, systemId, units }, callback) => {
     console.log(`[Battle] ⚡ Received battle:start - ${units?.length || 0} units`);
+    console.log(`[Battle] 🔍 Callback provided: ${!!callback}`);
+    console.log(`[Battle] 🔍 Callback type: ${typeof callback}`);
     
     if (!battleId || !systemId || !Array.isArray(units)) {
       console.warn('[Battle] ❌ Invalid payload');
-      if (callback) callback({ success: false, error: 'Invalid payload' });
+      if (callback) {
+        console.log('[Battle] 📡 Calling callback with error...');
+        callback({ success: false, error: 'Invalid payload' });
+      }
       return;
     }
 
@@ -92,14 +98,37 @@ io.on('connection', (socket) => {
       const result = battleManager.startBattle(battleId, systemId, units);
       const elapsed = Date.now() - startTime;
       
-      console.log(`[Battle] ✅ Battle started in ${elapsed}ms - Success: ${result.success}`);
+      console.log(`[Battle] ✅ Battle started in ${elapsed}ms`);
+      console.log(`[Battle] 🔍 Result object:`, result);
+      console.log(`[Battle] 🔍 Result.success: ${result.success}`);
+      console.log(`[Battle] 🔍 Result.battleId: ${result.battleId}`);
+      console.log(`[Battle] 🔍 Result type: ${typeof result}`);
+      console.log(`[Battle] 🔍 Result is null: ${result === null}`);
+      console.log(`[Battle] 🔍 Result is undefined: ${result === undefined}`);
       
-      if (callback) callback(result);
+      if (callback) {
+        console.log(`[Battle] 📡 Calling callback with result...`);
+        console.log(`[Battle] 📡 About to send:`, JSON.stringify(result));
+        
+        try {
+          callback(result);
+          console.log(`[Battle] ✅ Callback called successfully`);
+        } catch (cbError) {
+          console.error(`[Battle] ❌ Error calling callback:`, cbError);
+        }
+      } else {
+        console.warn(`[Battle] ⚠️  No callback provided!`);
+      }
+      
       socket.join(`system:${systemId}`);
+      console.log(`[Battle] 📺 Socket joined room: system:${systemId}`);
       
     } catch (error) {
       console.error('[Battle] ❌ Error:', error.message);
-      if (callback) callback({ success: false, error: error.message });
+      console.error('[Battle] Stack:', error.stack);
+      if (callback) {
+        callback({ success: false, error: error.message });
+      }
     }
   });
 
