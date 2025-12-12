@@ -4,6 +4,7 @@ use crate::targeting::find_best_target;
 use crate::weapons::try_fire_weapon;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use web_sys::console;
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
@@ -90,11 +91,22 @@ impl BattleSimulator {
     }
 
     /// Main simulation tick - HIGHLY OPTIMIZED
-    /// 
+    ///
     /// Target: <5ms for 10,000 units
     pub fn simulate_tick(&mut self, dt: f32, current_time: f64) -> TickResult {
         self.tick += 1;
-        
+
+        // DEBUG: Log tick start (every 20 ticks = ~1 second)
+        if self.tick % 20 == 0 {
+            let alive_count = self.units.iter().filter(|u| u.alive).count();
+            let with_targets = self.units.iter().filter(|u| u.alive && u.target_id.is_some()).count();
+            let with_weapons = self.units.iter().filter(|u| u.alive && !u.weapons.is_empty()).count();
+            console::log_1(&format!(
+                "[Simulator] Tick {}: alive={}, with_targets={}, with_weapons={}, dt={:.3}s, time={:.1}",
+                self.tick, alive_count, with_targets, with_weapons, dt, current_time
+            ).into());
+        }
+
         // 1. Update spatial grid - O(n)
         self.grid.clear();
         for (idx, unit) in self.units.iter().enumerate() {
@@ -176,6 +188,10 @@ impl BattleSimulator {
         // (attacker_idx, target_idx, damage, weapon_tag, distance)
         let mut weapon_fires: Vec<(usize, usize, f32, String, f32)> = Vec::new();
 
+        // DEBUG: Count combat-ready units
+        let mut units_with_target = 0;
+        let mut units_checked_weapons = 0;
+
         for attacker_idx in 0..self.units.len() {
             if !self.units[attacker_idx].alive {
                 continue;
@@ -183,20 +199,44 @@ impl BattleSimulator {
 
             let attacker_target_id = self.units[attacker_idx].target_id;
             if attacker_target_id.is_none() {
+                // DEBUG: Log units without targets (sample)
+                if self.tick % 20 == 0 && attacker_idx == 0 {
+                    console::log_1(&format!(
+                        "[Combat] Unit {} has no target",
+                        self.units[attacker_idx].id
+                    ).into());
+                }
                 continue;
             }
+            units_with_target += 1;
 
             let target_id = attacker_target_id.unwrap();
 
             // Find target index
             let target_idx_opt = self.units.iter().position(|u| u.id == target_id && u.alive);
             if target_idx_opt.is_none() {
+                // DEBUG: Target is dead/missing
+                if self.tick % 20 == 0 {
+                    console::log_1(&format!(
+                        "[Combat] Unit {} target {} not found or dead",
+                        self.units[attacker_idx].id, target_id
+                    ).into());
+                }
                 continue;
             }
             let target_idx = target_idx_opt.unwrap();
 
             // Check each weapon
+            let weapon_count = self.units[attacker_idx].weapons.len();
+            if weapon_count == 0 && self.tick % 20 == 0 && attacker_idx < 5 {
+                console::log_1(&format!(
+                    "[Combat] Unit {} has NO WEAPONS!",
+                    self.units[attacker_idx].id
+                ).into());
+            }
+
             for weapon in &self.units[attacker_idx].weapons {
+                units_checked_weapons += 1;
                 let attacker = &self.units[attacker_idx];
                 let target = &self.units[target_idx];
 
@@ -205,6 +245,14 @@ impl BattleSimulator {
                     weapon_fires.push((attacker_idx, target_idx, damage, weapon.tag.clone(), distance));
                 }
             }
+        }
+
+        // DEBUG: Log combat summary
+        if self.tick % 20 == 0 {
+            console::log_1(&format!(
+                "[Combat] Tick {}: units_with_target={}, weapons_checked={}, weapons_fired={}",
+                self.tick, units_with_target, units_checked_weapons, weapon_fires.len()
+            ).into());
         }
 
         // Now update weapon cooldowns, queue damage, and build weapons_fired
@@ -238,17 +286,37 @@ impl BattleSimulator {
             *damage_by_target.entry(entry.target_idx).or_insert(0.0) += entry.damage;
         }
 
+        // DEBUG: Log damage queue
+        if !self.damage_queue.is_empty() {
+            console::log_1(&format!(
+                "[Damage] Tick {}: Processing {} damage entries for {} targets",
+                self.tick, self.damage_queue.len(), damage_by_target.len()
+            ).into());
+        }
+
         let mut destroyed = Vec::new();
         let mut damaged = Vec::new();
 
         for (&target_idx, &total_damage) in &damage_by_target {
             let unit = &mut self.units[target_idx];
             let was_alive = unit.alive;
-            
+            let hp_before = unit.hp;
+            let shield_before = unit.shield;
+
             unit.take_damage(total_damage);
+
+            // DEBUG: Log damage application
+            console::log_1(&format!(
+                "[Damage] Unit {}: took {:.1} dmg, HP {:.1}->{:.1}, Shield {:.1}->{:.1}, alive={}",
+                unit.id, total_damage, hp_before, unit.hp, shield_before, unit.shield, unit.alive
+            ).into());
 
             if was_alive && !unit.alive {
                 destroyed.push(unit.id);
+                console::log_1(&format!(
+                    "[Damage] Unit {} DESTROYED!",
+                    unit.id
+                ).into());
             } else if total_damage > 0.0 {
                 damaged.push(DamagedUnit {
                     id: unit.id,

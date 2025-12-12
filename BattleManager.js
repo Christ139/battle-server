@@ -117,6 +117,28 @@ class BattleManager {
 
         battle.tick++;
 
+        // DEBUG: Log combat activity
+        if (tickResult.weaponsFired?.length > 0) {
+          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.weaponsFired.length} weapons fired`);
+          for (const wf of tickResult.weaponsFired) {
+            console.log(`  -> Attacker ${wf.attackerId} fired ${wf.weaponType} at Target ${wf.targetId} (impact: ${wf.impactTime}ms)`);
+          }
+        }
+        if (tickResult.damaged?.length > 0) {
+          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.damaged.length} units damaged`);
+          for (const d of tickResult.damaged) {
+            console.log(`  -> Unit ${d.id}: HP=${d.hp.toFixed(1)}, Shield=${d.shield.toFixed(1)}`);
+          }
+        }
+        if (tickResult.destroyed?.length > 0) {
+          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.destroyed.length} units DESTROYED: ${tickResult.destroyed.join(', ')}`);
+        }
+
+        // DEBUG: Log every 20 ticks (1 second) with battle state summary
+        if (battle.tick % 20 === 0) {
+          console.log(`[Battle ${battleId}] Tick ${battle.tick} summary: moved=${tickResult.moved?.length || 0}, damaged=${tickResult.damaged?.length || 0}, destroyed=${tickResult.destroyed?.length || 0}, weaponsFired=${tickResult.weaponsFired?.length || 0}`);
+        }
+
         // FIX: ALWAYS emit tick events (even when empty) for client performance tracking
         // This allows the client to measure tick rate, tick times, and know the simulation is running
         this.io.to(`system:${battle.systemId}`).emit('battle:tick', {
