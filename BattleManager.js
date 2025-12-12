@@ -28,6 +28,15 @@ class BattleManager {
     try {
       console.log(`[BattleManager] Starting battle ${battleId} in system ${systemId} with ${units.length} units`);
 
+      // DEBUG: Log unit data to check weapons
+      console.log(`[BattleManager] DEBUG: Checking unit data...`);
+      for (const unit of units.slice(0, 3)) {
+        console.log(`  Unit ${unit.id}: faction=${unit.faction_id}, weapons=${JSON.stringify(unit.weapons)}, pos=(${unit.pos_x?.toFixed(1)}, ${unit.pos_y?.toFixed(1)}, ${unit.pos_z?.toFixed(1)})`);
+      }
+      const unitsWithWeapons = units.filter(u => u.weapons && u.weapons.length > 0).length;
+      const factions = [...new Set(units.map(u => u.faction_id))];
+      console.log(`  Total: ${units.length} units, ${unitsWithWeapons} with weapons, factions: ${factions.join(', ')}`);
+
       // Create WASM simulator
       const unitsJson = JSON.stringify(units);
       const simulator = new WasmBattleSimulator(unitsJson);
