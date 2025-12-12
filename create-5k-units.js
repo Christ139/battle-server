@@ -1,7 +1,6 @@
 /**
- * MASSIVE STRESS TEST - 5,000 Units (2,500 vs 2,500)
- * Fixed positioning: Ships within optimal weapon range!
- * Gap: 400 units between closest edges (perfect for 1000 max range)
+ * Create 5,000 test units for massive stress test
+ * 2,500 vs 2,500 (Eve Online scale!)
  */
 
 const { Pool } = require('pg');
@@ -15,15 +14,14 @@ const pool = new Pool({
   ssl: false
 });
 
-const SYSTEM_ID = 9999993; // Changed to avoid conflicts
+const SYSTEM_ID = 9999999;
 const FACTION_A_PLAYER = 9001;
 const FACTION_B_PLAYER = 9002;
 const UNITS_PER_FACTION = 2500;
 
 async function create5kUnits() {
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║    MASSIVE STRESS TEST - 5,000 UNITS (2,500 vs 2,500)   ║');
-  console.log('║         Epic Fleet Battle Formation! ⚔️                   ║');
+  console.log('║         CREATING 5,000 UNITS FOR STRESS TEST            ║');
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 
   const client = await pool.connect();
@@ -31,21 +29,26 @@ async function create5kUnits() {
   try {
     await client.query('BEGIN');
 
+    // Step 1: Clean up old units
     console.log('📋 Step 1: Cleaning up old test units...');
+    
     const deleteResult = await client.query(`
       DELETE FROM "Units" 
       WHERE "PlayerID" IN ($1, $2)
         AND "LocationType" = 'SolarSystem'
         AND "LocationID" = $3
     `, [FACTION_A_PLAYER, FACTION_B_PLAYER, SYSTEM_ID]);
+    
     console.log(`✅ Deleted ${deleteResult.rowCount} old units\n`);
 
-    console.log('📋 Step 2: Finding combat-ready template...');
+    // Step 2: Get template with weapons
+    console.log('📋 Step 2: Finding template with weapons...');
+    
     const templateQuery = await client.query(`
       SELECT DISTINCT ums.unit_template_id, COUNT(*) as weapon_count
       FROM "UnitModuleSlots" ums
       GROUP BY ums.unit_template_id
-      HAVING COUNT(*) >= 1
+      HAVING COUNT(*) >= 3
       ORDER BY weapon_count DESC
       LIMIT 1
     `);
@@ -57,22 +60,20 @@ async function create5kUnits() {
     } else {
       const anyTemplate = await client.query(`SELECT "TemplateID" FROM "UnitTemplates" LIMIT 1`);
       templateId = anyTemplate.rows[0].TemplateID;
-      console.log(`⚠️  Using template ${templateId} (no weapons in DB)\n`);
+      console.log(`⚠️  Using template ${templateId}\n`);
     }
 
-    // Step 3: Create Faction A (massive battle formation on left)
+    // Step 3: Create Faction A units (2,500)
     console.log(`📋 Step 3: Creating ${UNITS_PER_FACTION} units for Faction A...`);
-    console.log(`   Formation: Epic fleet 600x1200 area at X=-500`);
-    console.log(`   This will take 30-60 seconds...\n`);
     
     const startTimeA = Date.now();
     const factionAValues = [];
     
     for (let i = 0; i < UNITS_PER_FACTION; i++) {
-      // Epic formation: 600 wide (X), 1200 deep (Z), centered at X=-500
-      const x = -500 + (Math.random() * 600 - 300); // -800 to -200
-      const y = 15 + (Math.random() * 30 - 15);      // 0 to 30
-      const z = Math.random() * 1200 - 600;           // -600 to 600
+      // Spread units in 1500x1500 area
+      const x = Math.random() * 1500 - 750;
+      const y = Math.random() * 100;
+      const z = Math.random() * 1500 - 750;
       
       factionAValues.push(`(
         ${templateId}, 
@@ -90,7 +91,7 @@ async function create5kUnits() {
       )`);
       
       if ((i + 1) % 500 === 0) {
-        console.log(`  Created ${i + 1}/${UNITS_PER_FACTION} units...`);
+        console.log(`  Created ${i + 1} units...`);
       }
     }
 
@@ -106,22 +107,19 @@ async function create5kUnits() {
     `);
     
     const elapsedA = ((Date.now() - startTimeA) / 1000).toFixed(1);
-    console.log(`✅ Faction A fleet deployed in ${elapsedA}s\n`);
+    console.log(`✅ Created ${UNITS_PER_FACTION} units for Faction A in ${elapsedA}s\n`);
 
-    // Step 4: Create Faction B (massive battle formation on right, 400 units away)
+    // Step 4: Create Faction B units (2,500)
     console.log(`📋 Step 4: Creating ${UNITS_PER_FACTION} units for Faction B...`);
-    console.log(`   Formation: Epic fleet 600x1200 area at X=+500`);
-    console.log(`   Gap: 400 units (WITHIN MAX WEAPON RANGE!) ⚔️`);
-    console.log(`   This will take 30-60 seconds...\n`);
     
     const startTimeB = Date.now();
     const factionBValues = [];
     
     for (let i = 0; i < UNITS_PER_FACTION; i++) {
-      // Epic formation: 600 wide (X), 1200 deep (Z), centered at X=+500
-      const x = 500 + (Math.random() * 600 - 300);  // 200 to 800
-      const y = 15 + (Math.random() * 30 - 15);      // 0 to 30
-      const z = Math.random() * 1200 - 600;           // -600 to 600
+      // Spread units in different 1500x1500 area (offset by 2000)
+      const x = Math.random() * 1500 + 2000;
+      const y = Math.random() * 100;
+      const z = Math.random() * 1500 - 750;
       
       factionBValues.push(`(
         ${templateId}, 
@@ -139,7 +137,7 @@ async function create5kUnits() {
       )`);
       
       if ((i + 1) % 500 === 0) {
-        console.log(`  Created ${i + 1}/${UNITS_PER_FACTION} units...`);
+        console.log(`  Created ${i + 1} units...`);
       }
     }
 
@@ -155,17 +153,7 @@ async function create5kUnits() {
     `);
     
     const elapsedB = ((Date.now() - startTimeB) / 1000).toFixed(1);
-    console.log(`✅ Faction B fleet deployed in ${elapsedB}s\n`);
-
-    // Step 5: Set up enemy relationship
-    console.log('📋 Step 5: Setting up enemy relationship...');
-    await client.query(`
-      INSERT INTO "PlayerRelationships" ("PlayerID_A", "PlayerID_B", "Status_A_to_B", "Status_B_to_A")
-      VALUES ($1, $2, 'Enemy', 'Enemy')
-      ON CONFLICT ("PlayerID_A", "PlayerID_B") 
-      DO UPDATE SET "Status_A_to_B" = 'Enemy', "Status_B_to_A" = 'Enemy'
-    `, [FACTION_A_PLAYER, FACTION_B_PLAYER]);
-    console.log(`✅ Players ${FACTION_A_PLAYER} and ${FACTION_B_PLAYER} are now enemies\n`);
+    console.log(`✅ Created ${UNITS_PER_FACTION} units for Faction B in ${elapsedB}s\n`);
 
     await client.query('COMMIT');
 
@@ -175,48 +163,31 @@ async function create5kUnits() {
       SELECT 
         "PlayerID",
         COUNT(*) as unit_count,
-        ROUND(AVG("PosX")) as avg_x,
-        ROUND(MIN("PosX")) as min_x,
-        ROUND(MAX("PosX")) as max_x,
-        ROUND(AVG("PosZ")) as avg_z,
-        ROUND(MIN("PosZ")) as min_z,
-        ROUND(MAX("PosZ")) as max_z
+        AVG("PosX") as avg_x,
+        AVG("PosZ") as avg_z
       FROM "Units"
       WHERE "LocationType" = 'SolarSystem'
         AND "LocationID" = $1
       GROUP BY "PlayerID"
     `, [SYSTEM_ID]);
 
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('✅ MASSIVE STRESS TEST READY!\n');
-    
+    console.log('\n✅ UNITS CREATED SUCCESSFULLY!\n');
     verify.rows.forEach(row => {
       const faction = row.PlayerID === FACTION_A_PLAYER ? 'Faction A' : 'Faction B';
-      console.log(`  ${faction}: ${row.unit_count} units`);
-      console.log(`    X: ${row.min_x} to ${row.max_x} (center: ${row.avg_x})`);
-      console.log(`    Z: ${row.min_z} to ${row.max_z} (front: ${row.max_z - row.min_z} wide)`);
+      console.log(`  ${faction}: ${row.unit_count} units at (${Math.round(row.avg_x)}, ${Math.round(row.avg_z)})`);
     });
 
-    const gap = verify.rows[1].avg_x - verify.rows[0].avg_x;
-    const closestGap = verify.rows[1].min_x - verify.rows[0].max_x;
-    const frontWidth = Math.abs(verify.rows[0].max_z - verify.rows[0].min_z);
-    
-    console.log(`\n  📏 Gap between fleet centers: ${gap} units`);
-    console.log(`  🎯 Gap between closest edges: ${closestGap} units`);
-    console.log(`  📐 Front width: ${Math.round(frontWidth)} units`);
-    console.log(`  ⚔️  Combat status: ${closestGap < 1000 ? 'FLEETS IN RANGE ✅' : 'Out of range ❌'}`);
-    
+    const totalUnits = verify.rows.reduce((sum, row) => sum + parseInt(row.unit_count), 0);
+
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🎮 READY FOR EPIC BATTLE!');
+    console.log('✅ 5,000 UNITS READY FOR STRESS TEST!');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    console.log(`Total units: ${totalUnits}`);
     console.log(`System ID: ${SYSTEM_ID}`);
-    console.log(`Total units: ${UNITS_PER_FACTION * 2}`);
-    console.log(`Formation: Two massive fleets facing each other`);
-    console.log(`Faction A: ${UNITS_PER_FACTION} units at X=-500`);
-    console.log(`Faction B: ${UNITS_PER_FACTION} units at X=+500`);
-    console.log(`Gap: ${closestGap} units (optimal for sustained combat)`);
-    console.log(`Enemy relationship: ✅ SET`);
-    console.log(`\nNext: Run test with: node test-5k-stress.js`);
+    console.log(`Faction A: ${UNITS_PER_FACTION} units`);
+    console.log(`Faction B: ${UNITS_PER_FACTION} units`);
+    console.log(`Relationship: Enemy vs Enemy ⚔️\n`);
+    console.log('Next: Run stress test with test-5k-stress.js');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
   } catch (error) {

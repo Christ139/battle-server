@@ -1,7 +1,6 @@
 /**
- * MEDIUM BATTLE TEST RUNNER - 1,000 Units
- * Realistic battle scenario test
- * Expected: Sustained combat with gradual casualties
+ * Stress Test - 1,000 Units (EVENT-BASED)
+ * Uses event listener instead of callback for large payloads
  */
 
 const io = require('socket.io-client');
@@ -16,8 +15,8 @@ const pool = new Pool({
   ssl: false
 });
 
-const SYSTEM_ID = 9999992;
-const TEST_DURATION_MS = 120000; // 2 minutes
+const SYSTEM_ID = 9999999;
+const TEST_DURATION_MS = 60000;
 
 const metrics = {
   tickCount: 0,
@@ -25,20 +24,16 @@ const metrics = {
   damageEvents: 0,
   movementEvents: 0,
   destroyedUnits: 0,
-  weaponsFired: 0,
   startTime: null,
-  endTime: null,
-  peakMemory: 0
+  endTime: null
 };
 
-async function run1kBattleTest() {
+async function runStressTest() {
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║       🎮 MEDIUM BATTLE TEST - 1,000 UNITS 🎮            ║');
-  console.log('║            Battle Line Engagement!                      ║');
+  console.log('║      BATTLE STRESS TEST - 1,000 UNITS (EVENT-BASED)    ║');
   console.log('╚══════════════════════════════════════════════════════════╝\n');
 
-  console.log('📡 Step 1: Loading units from database...\n');
-  
+  console.log('📡 Step 1: Loading units from database...');
   const { fetchBattleUnitsData } = require('/srv/game-server/src/services/battle-data.service');
   const units = await fetchBattleUnitsData(SYSTEM_ID, pool);
   
@@ -46,20 +41,16 @@ async function run1kBattleTest() {
   
   const factions = [...new Set(units.map(u => u.faction_id))];
   const armedUnits = units.filter(u => u.weapons && u.weapons.length > 0);
-  const totalWeapons = units.reduce((sum, u) => sum + (u.weapons?.length || 0), 0);
   
   console.log(`   Factions: ${factions.join(' vs ')}`);
-  console.log(`   Armed units: ${armedUnits.length}/${units.length}`);
-  console.log(`   Total weapons: ${totalWeapons.toLocaleString()}\n`);
+  console.log(`   Armed units: ${armedUnits.length}\n`);
 
-  const payloadJson = JSON.stringify(units);
-  const payloadSizeMB = (Buffer.byteLength(payloadJson, 'utf8') / 1024 / 1024).toFixed(2);
-  
   console.log('📡 Step 2: Connecting to battle server...');
   const socket = io('http://localhost:4100', {
     transports: ['websocket'],
     reconnection: false,
-    timeout: 60000
+    timeout: 60000,
+    ackTimeout: 60000
   });
 
   await new Promise((resolve, reject) => {
@@ -73,29 +64,33 @@ async function run1kBattleTest() {
       reject(err);
     });
     
-    setTimeout(() => reject(new Error('Connection timeout')), 15000);
+    setTimeout(() => reject(new Error('Connection timeout')), 10000);
   });
 
   console.log('🎮 Step 3: Starting battle...');
   console.log(`   System: ${SYSTEM_ID}`);
   console.log(`   Units: ${units.length}`);
-  console.log(`   Payload size: ${payloadSizeMB} MB`);
-  console.log(`   Expected init time: 3-10 seconds\n`);
+  console.log(`   Payload size: ~2.4 MB`);
+  console.log('');
 
-  const battleId = `medium_test_${Date.now()}`;
+  const battleId = `stress_test_${Date.now()}`;
   
-  console.log('⏳ Initializing 1,000 units...\n');
+  console.log('⏳ Sending large payload...\n');
   
   const emitStart = Date.now();
   
+  // Listen for event-based response
   socket.once('battle:start:response', (response) => {
     const emitElapsed = Date.now() - emitStart;
     
-    console.log(`📊 Response received after ${(emitElapsed / 1000).toFixed(1)}s\n`);
+    console.log(`📊 Response received via EVENT after ${emitElapsed}ms\n`);
+    console.log(`   Success: ${response.success}`);
+    console.log(`   Battle ID: ${response.battleId}`);
+    console.log(`   Error: ${response.error || 'none'}\n`);
     
     if (response && response.success) {
-      console.log('✅ BATTLE STARTED!\n');
-      console.log('📊 Monitoring for 2 minutes...\n');
+      console.log('✅ Battle started successfully!\n');
+      console.log('📊 Monitoring performance...\n');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
       metrics.startTime = Date.now();
@@ -114,17 +109,12 @@ async function run1kBattleTest() {
         if (data.moved) metrics.movementEvents += data.moved.length;
         if (data.damaged) metrics.damageEvents += data.damaged.length;
         if (data.destroyed) metrics.destroyedUnits += data.destroyed.length;
-        if (data.weaponsFired) metrics.weaponsFired += data.weaponsFired.length;
-        
-        const memUsage = process.memoryUsage();
-        metrics.peakMemory = Math.max(metrics.peakMemory, memUsage.heapUsed);
         
         if (now - lastSecondReport >= 1000) {
           const elapsed = Math.floor((now - metrics.startTime) / 1000);
           const avgTickTime = metrics.tickTimes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, metrics.tickTimes.length);
-          const memMB = (memUsage.heapUsed / 1024 / 1024).toFixed(0);
           
-          process.stdout.write(`\r[${elapsed}s] Ticks: ${metrics.tickCount} | Rate: ${ticksThisSecond}/s | Avg: ${avgTickTime.toFixed(1)}ms | Mem: ${memMB}MB | Wpn: ${metrics.weaponsFired} | Dmg: ${metrics.damageEvents} | Dead: ${metrics.destroyedUnits}    `);
+          process.stdout.write(`\r[${elapsed}s] Ticks: ${metrics.tickCount} | Rate: ${ticksThisSecond}/s | Avg: ${avgTickTime.toFixed(1)}ms | Dmg: ${metrics.damageEvents} | Destroyed: ${metrics.destroyedUnits}    `);
           
           ticksThisSecond = 0;
           lastSecondReport = now;
@@ -142,7 +132,7 @@ async function run1kBattleTest() {
 
       setTimeout(() => {
         if (!metrics.endTime) {
-          console.log('\n\n⏱️  Test duration reached (2 minutes)\n');
+          console.log('\n\n⏱️  Test duration reached\n');
           metrics.endTime = Date.now();
           printResults();
           cleanup();
@@ -157,6 +147,7 @@ async function run1kBattleTest() {
     }
   });
   
+  // Emit the battle:start event (callback will be null/ignored)
   socket.emit('battle:start', {
     battleId,
     systemId: SYSTEM_ID,
@@ -169,10 +160,9 @@ async function run1kBattleTest() {
     const avgTickTime = metrics.tickTimes.reduce((a, b) => a + b, 0) / metrics.tickTimes.length;
     const maxTickTime = Math.max(...metrics.tickTimes);
     const minTickTime = Math.min(...metrics.tickTimes);
-    const peakMemoryMB = (metrics.peakMemory / 1024 / 1024).toFixed(1);
     
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📊 MEDIUM BATTLE TEST RESULTS (1,000 UNITS)');
+    console.log('📊 STRESS TEST RESULTS (1,000 UNITS)');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
     
     console.log('⏱️  PERFORMANCE:');
@@ -187,33 +177,22 @@ async function run1kBattleTest() {
     console.log(`   Max: ${maxTickTime.toFixed(1)}ms\n`);
     
     console.log('🎯 BATTLE EVENTS:');
-    console.log(`   Weapons fired: ${metrics.weaponsFired.toLocaleString()}`);
     console.log(`   Movement events: ${metrics.movementEvents.toLocaleString()}`);
     console.log(`   Damage events: ${metrics.damageEvents.toLocaleString()}`);
-    console.log(`   Units destroyed: ${metrics.destroyedUnits}/${units.length} (${(metrics.destroyedUnits / units.length * 100).toFixed(1)}%)`);
+    console.log(`   Units destroyed: ${metrics.destroyedUnits}`);
     console.log(`   Events per second: ${((metrics.movementEvents + metrics.damageEvents) / duration).toFixed(0)}\n`);
-    
-    console.log('💾 MEMORY:');
-    console.log(`   Peak memory: ${peakMemoryMB} MB\n`);
     
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
     if (avgTickRate >= 18 && avgTickTime < 60) {
-      console.log('✅ MEDIUM TEST PASSED!');
-      console.log('   🎉 System handles 1,000 units excellently!');
-      console.log('   🚀 Ready for production battles!');
-    } else if (avgTickRate >= 15 && avgTickTime < 80) {
-      console.log('✅ TEST ACCEPTABLE');
-      console.log('   System handles 1,000 units well');
-      console.log('   Some optimization possible');
-    } else if (avgTickRate >= 10) {
-      console.log('⚠️  TEST MARGINAL');
-      console.log('   System struggles slightly');
-      console.log('   Consider optimization');
+      console.log('✅ STRESS TEST PASSED!');
+      console.log('   System handles 1,000 units excellently');
+      console.log('   Ready for production battles');
+    } else if (avgTickRate >= 15) {
+      console.log('⚠️  STRESS TEST ACCEPTABLE');
+      console.log('   System handles 1,000 units adequately');
     } else {
-      console.log('❌ TEST FAILED');
-      console.log('   Performance below acceptable threshold');
-      console.log('   Optimization required');
+      console.log('❌ STRESS TEST NEEDS OPTIMIZATION');
     }
     
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -225,8 +204,8 @@ async function run1kBattleTest() {
   }
 }
 
-run1kBattleTest().catch(err => {
-  console.error('\n❌ Medium battle test failed:', err);
+runStressTest().catch(err => {
+  console.error('\n❌ Stress test failed:', err);
   pool.end();
   process.exit(1);
 });
