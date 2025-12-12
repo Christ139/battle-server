@@ -215,6 +215,7 @@ impl BattleSimulator {
             // Find target index
             let target_idx_opt = self.units.iter().position(|u| u.id == target_id && u.alive);
             if target_idx_opt.is_none() {
+                self.units[attacker_idx].target_id = None;
                 // DEBUG: Target is dead/missing
                 if self.tick % 20 == 0 {
                     log(&format!(
