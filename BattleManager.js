@@ -5,6 +5,7 @@
  * Handles tick loops, unit updates, and result persistence
  * 
  * FIX: Always emit tick events (even when empty) for client performance tracking
+ * FIX: Emit survivors/casualties as arrays of unit IDs, not counts
  */
 
 const { WasmBattleSimulator } = require('./battle-core/pkg/battle_core.js');
@@ -208,18 +209,22 @@ class BattleManager {
         error: error ? error.message : null
       };
 
+      // FIX: Emit survivors/casualties as arrays of unit IDs, not counts
+      const survivors = finalUnits.filter(u => u.alive).map(u => u.id);
+      const casualties = finalUnits.filter(u => !u.alive).map(u => u.id);
+
       // Emit battle ended event
-      this.io.to(`system:${battle.systemId}`).emit('battle:ended', {
+      this.io.to(`system:${battle.systemId}`).emit('battle:concluded', {
         battleId,
         systemId: battle.systemId,
         duration,
         totalTicks: battle.tick,
-        survivors: finalUnits.filter(u => u.alive).length,
-        casualties: finalUnits.filter(u => !u.alive).length,
+        survivors,    // Now an array of unit IDs: [3094, 3095, 3096, ...]
+        casualties,   // Now an array of unit IDs: [3150, 3151, 3152, ...]
         victor: activeFactions.length === 1 ? activeFactions[0] : null
       });
 
-      console.log(`[BattleManager] Battle ${battleId} ended. Duration: ${duration}ms, Ticks: ${battle.tick}`);
+      console.log(`[BattleManager] Battle ${battleId} ended. Duration: ${duration}ms, Ticks: ${battle.tick}, Survivors: ${survivors.length}, Casualties: ${casualties.length}`);
 
       // Keep battle in memory for 60 seconds for result queries
       setTimeout(() => {
