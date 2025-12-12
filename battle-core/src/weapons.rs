@@ -1,5 +1,5 @@
 use crate::battle_unit::{BattleUnit, Weapon};
-use web_sys::console;
+use crate::log;
 
 /// Check if weapon can fire and calculate damage
 pub fn try_fire_weapon(
@@ -13,11 +13,11 @@ pub fn try_fire_weapon(
     if time_since_fired < weapon.cooldown as f64 {
         // DEBUG: Log cooldown block (only occasionally to avoid spam)
         if attacker.id % 100 == 0 {
-            console::log_1(&format!(
+            log(&format!(
                 "[Weapon] Unit {} weapon {} on cooldown: {:.2}s remaining (last_fired={:.2}, cooldown={:.2}, current={:.2})",
                 attacker.id, weapon.tag, weapon.cooldown as f64 - time_since_fired,
                 weapon.last_fired, weapon.cooldown, current_time
-            ).into());
+            ));
         }
         return None;
     }
@@ -29,10 +29,10 @@ pub fn try_fire_weapon(
     if dist > weapon.max_range {
         // DEBUG: Log range block
         if attacker.id % 100 == 0 {
-            console::log_1(&format!(
+            log(&format!(
                 "[Weapon] Unit {} weapon {} out of range: dist={:.1} > max_range={:.1}",
                 attacker.id, weapon.tag, dist, weapon.max_range
-            ).into());
+            ));
         }
         return None;
     }
@@ -41,36 +41,36 @@ pub fn try_fire_weapon(
     let mut damage = weapon.dps / weapon.fire_rate;
 
     // DEBUG: Log base damage calculation
-    console::log_1(&format!(
+    log(&format!(
         "[Weapon] Unit {} -> Unit {}: {} base_dmg={:.1} (dps={:.1} / fire_rate={:.1})",
         attacker.id, target.id, weapon.tag, damage, weapon.dps, weapon.fire_rate
-    ).into());
+    ));
 
     // Range falloff
     if dist > weapon.optimal_range {
         let falloff = 1.0 - ((dist - weapon.optimal_range) / (weapon.max_range - weapon.optimal_range));
         let old_damage = damage;
         damage *= falloff.max(0.1);
-        console::log_1(&format!(
+        log(&format!(
             "[Weapon]   Range falloff: dist={:.1} > optimal={:.1}, falloff={:.2}, dmg {:.1} -> {:.1}",
             dist, weapon.optimal_range, falloff, old_damage, damage
-        ).into());
+        ));
     }
 
     // Armor penalty
     if target.armor > weapon.target_armor_max {
         let old_damage = damage;
         damage *= 0.5;
-        console::log_1(&format!(
+        log(&format!(
             "[Weapon]   Armor penalty: target_armor={:.1} > max={:.1}, dmg {:.1} -> {:.1}",
             target.armor, weapon.target_armor_max, old_damage, damage
-        ).into());
+        ));
     }
 
-    console::log_1(&format!(
+    log(&format!(
         "[Weapon]   FINAL DAMAGE: {:.1}",
         damage
-    ).into());
+    ));
 
     Some(damage)
 }

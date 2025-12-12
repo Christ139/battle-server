@@ -2,9 +2,9 @@ use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
 use crate::targeting::find_best_target;
 use crate::weapons::try_fire_weapon;
+use crate::log;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use web_sys::console;
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
@@ -101,10 +101,10 @@ impl BattleSimulator {
             let alive_count = self.units.iter().filter(|u| u.alive).count();
             let with_targets = self.units.iter().filter(|u| u.alive && u.target_id.is_some()).count();
             let with_weapons = self.units.iter().filter(|u| u.alive && !u.weapons.is_empty()).count();
-            console::log_1(&format!(
+            log(&format!(
                 "[Simulator] Tick {}: alive={}, with_targets={}, with_weapons={}, dt={:.3}s, time={:.1}",
                 self.tick, alive_count, with_targets, with_weapons, dt, current_time
-            ).into());
+            ));
         }
 
         // 1. Update spatial grid - O(n)
@@ -201,10 +201,10 @@ impl BattleSimulator {
             if attacker_target_id.is_none() {
                 // DEBUG: Log units without targets (sample)
                 if self.tick % 20 == 0 && attacker_idx == 0 {
-                    console::log_1(&format!(
+                    log(&format!(
                         "[Combat] Unit {} has no target",
                         self.units[attacker_idx].id
-                    ).into());
+                    ));
                 }
                 continue;
             }
@@ -217,10 +217,10 @@ impl BattleSimulator {
             if target_idx_opt.is_none() {
                 // DEBUG: Target is dead/missing
                 if self.tick % 20 == 0 {
-                    console::log_1(&format!(
+                    log(&format!(
                         "[Combat] Unit {} target {} not found or dead",
                         self.units[attacker_idx].id, target_id
-                    ).into());
+                    ));
                 }
                 continue;
             }
@@ -229,10 +229,10 @@ impl BattleSimulator {
             // Check each weapon
             let weapon_count = self.units[attacker_idx].weapons.len();
             if weapon_count == 0 && self.tick % 20 == 0 && attacker_idx < 5 {
-                console::log_1(&format!(
+                log(&format!(
                     "[Combat] Unit {} has NO WEAPONS!",
                     self.units[attacker_idx].id
-                ).into());
+                ));
             }
 
             for weapon in &self.units[attacker_idx].weapons {
@@ -249,10 +249,10 @@ impl BattleSimulator {
 
         // DEBUG: Log combat summary
         if self.tick % 20 == 0 {
-            console::log_1(&format!(
+            log(&format!(
                 "[Combat] Tick {}: units_with_target={}, weapons_checked={}, weapons_fired={}",
                 self.tick, units_with_target, units_checked_weapons, weapon_fires.len()
-            ).into());
+            ));
         }
 
         // Now update weapon cooldowns, queue damage, and build weapons_fired
@@ -288,10 +288,10 @@ impl BattleSimulator {
 
         // DEBUG: Log damage queue
         if !self.damage_queue.is_empty() {
-            console::log_1(&format!(
+            log(&format!(
                 "[Damage] Tick {}: Processing {} damage entries for {} targets",
                 self.tick, self.damage_queue.len(), damage_by_target.len()
-            ).into());
+            ));
         }
 
         let mut destroyed = Vec::new();
@@ -306,17 +306,17 @@ impl BattleSimulator {
             unit.take_damage(total_damage);
 
             // DEBUG: Log damage application
-            console::log_1(&format!(
+            log(&format!(
                 "[Damage] Unit {}: took {:.1} dmg, HP {:.1}->{:.1}, Shield {:.1}->{:.1}, alive={}",
                 unit.id, total_damage, hp_before, unit.hp, shield_before, unit.shield, unit.alive
-            ).into());
+            ));
 
             if was_alive && !unit.alive {
                 destroyed.push(unit.id);
-                console::log_1(&format!(
+                log(&format!(
                     "[Damage] Unit {} DESTROYED!",
                     unit.id
-                ).into());
+                ));
             } else if total_damage > 0.0 {
                 damaged.push(DamagedUnit {
                     id: unit.id,

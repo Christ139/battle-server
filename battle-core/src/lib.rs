@@ -9,6 +9,13 @@ use simulator::BattleSimulator;
 use battle_unit::BattleUnit;
 use serde_json;
 
+// JS console binding that works in both browser and Node.js
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    pub fn log(s: &str);
+}
+
 /// WASM-exported battle simulator
 #[wasm_bindgen]
 pub struct WasmBattleSimulator {
