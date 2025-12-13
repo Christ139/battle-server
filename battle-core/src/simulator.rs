@@ -369,77 +369,10 @@ impl BattleSimulator {
             }
         }
 
-        // 3. Movement - O(n)
-        // Auto-movement for all units (including those owned by offline players)
-        let mut moved: Vec<MovedUnit> = Vec::new();
-        
-        for idx in 0..self.units.len() {
-            if !self.units[idx].alive {
-                continue;
-            }
-
-            // Stations don't move
-            if self.units[idx].is_station {
-                continue;
-            }
-
-            // Get target position if exists
-            let target_pos = if let Some(target_id) = self.units[idx].target_id {
-                self.units.iter()
-                    .find(|u| u.id == target_id && u.alive)
-                    .map(|u| (u.pos_x, u.pos_y, u.pos_z))
-            } else {
-                None
-            };
-
-            // Get optimal range from first weapon
-            let optimal_range = if !self.units[idx].weapons.is_empty() {
-                self.units[idx].weapons[0].optimal_range
-            } else {
-                0.0
-            };
-
-            let unit = &mut self.units[idx];
-            let old_pos = (unit.pos_x, unit.pos_y, unit.pos_z);
-
-            if let Some((tx, ty, tz)) = target_pos {
-                let dx = tx - unit.pos_x;
-                let dy = ty - unit.pos_y;
-                let dz = tz - unit.pos_z;
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-
-                if dist > optimal_range {
-                    // Move towards target
-                    unit.move_towards(tx, ty, tz);
-                } else if dist < optimal_range * 0.8 {
-                    // Back away (too close)
-                    unit.move_away(tx, ty, tz);
-                } else {
-                    // At optimal range, stop
-                    unit.stop();
-                }
-            } else {
-                // No target, stop moving
-                unit.stop();
-            }
-
-            // Update position
-            unit.update_position(dt);
-
-            // Track if moved significantly
-            let moved_dist = ((unit.pos_x - old_pos.0).powi(2) + 
-                             (unit.pos_y - old_pos.1).powi(2) + 
-                             (unit.pos_z - old_pos.2).powi(2)).sqrt();
-            
-            if moved_dist > 0.01 {
-                moved.push(MovedUnit {
-                    id: unit.id,
-                    x: unit.pos_x,
-                    y: unit.pos_y,
-                    z: unit.pos_z,
-                });
-            }
-        }
+        // 3. Movement - USER INPUT ONLY
+        // Simulator does NOT auto-move units. All movement comes from player input
+        // via the position sync system (update_positions / update_single_position)
+        let moved: Vec<MovedUnit> = Vec::new();
 
         // 4. Combat - O(n) weapons
         self.damage_queue.clear();
