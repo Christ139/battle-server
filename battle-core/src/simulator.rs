@@ -7,6 +7,7 @@
 // 4. Added periodic target re-evaluation (every 40 ticks = 2 seconds)
 // 5. Added target validity checking (range, alive status)
 // 6. Auto-movement for units with no player input (offline users)
+// 7. FIXED: Borrow checker error in damage processing section
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
@@ -129,7 +130,7 @@ impl BattleSimulator {
     }
 
     // =========================================================================
-    // ✅ NEW: External position update methods
+    // External position update methods
     // =========================================================================
 
     /// Update multiple unit positions from external source (player movement)
@@ -285,7 +286,7 @@ impl BattleSimulator {
         }
 
         // 2. Target acquisition and validation - O(k) per unit
-        // ✅ UPDATED: Now validates existing targets and periodically re-evaluates
+        // Now validates existing targets and periodically re-evaluates
         for idx in 0..self.units.len() {
             if !self.units[idx].alive || !self.units[idx].has_weapons {
                 continue;
@@ -322,7 +323,7 @@ impl BattleSimulator {
         }
 
         // 3. Movement - O(n)
-        // ✅ UPDATED: Auto-movement for all units (including those owned by offline players)
+        // Auto-movement for all units (including those owned by offline players)
         let mut moved: Vec<MovedUnit> = Vec::new();
         
         for idx in 0..self.units.len() {
@@ -478,6 +479,7 @@ impl BattleSimulator {
         }
 
         // 5. Process damage queue
+        // ✅ FIXED: Restructured to avoid double mutable borrow
         let mut damage_by_target: HashMap<usize, f32> = HashMap::new();
         for entry in &self.damage_queue {
             *damage_by_target.entry(entry.target_idx).or_insert(0.0) += entry.damage;
@@ -485,34 +487,53 @@ impl BattleSimulator {
 
         let mut destroyed: Vec<u32> = Vec::new();
         let mut damaged: Vec<DamagedUnit> = Vec::new();
+        let mut destroyed_unit_ids: Vec<u32> = Vec::new(); // Collect destroyed IDs separately
 
         for (&target_idx, &total_damage) in &damage_by_target {
-            let unit = &mut self.units[target_idx];
-            let was_alive = unit.alive;
-
-            unit.take_damage(total_damage);
-
-            if was_alive && !unit.alive {
-                destroyed.push(unit.id);
-                log(&format!("[Damage] Unit {} DESTROYED!", unit.id));
+            // Extract all needed values BEFORE any nested iteration
+            let unit_id: u32;
+            let unit_hp: f32;
+            let unit_shield: f32;
+            let was_destroyed: bool;
+            
+            {
+                // Scoped mutable borrow
+                let unit = &mut self.units[target_idx];
+                let was_alive = unit.alive;
                 
-                // ✅ IMPORTANT: Clear targets pointing to destroyed unit
-                for other in self.units.iter_mut() {
-                    if other.target_id == Some(unit.id) {
-                        other.target_id = None;
-                    }
-                }
+                unit.take_damage(total_damage);
+                
+                unit_id = unit.id;
+                unit_hp = unit.hp;
+                unit_shield = unit.shield;
+                was_destroyed = was_alive && !unit.alive;
+            } // Mutable borrow ends here
+            
+            if was_destroyed {
+                destroyed.push(unit_id);
+                destroyed_unit_ids.push(unit_id);
+                log(&format!("[Damage] Unit {} DESTROYED!", unit_id));
             } else if total_damage > 0.0 {
                 damaged.push(DamagedUnit {
-                    id: unit.id,
-                    hp: unit.hp,
-                    shield: unit.shield,
+                    id: unit_id,
+                    hp: unit_hp,
+                    shield: unit_shield,
                 });
             }
 
+            // Update attacker damage dealt stats
             for entry in &self.damage_queue {
                 if entry.target_idx == target_idx {
                     self.units[entry.attacker_idx].damage_dealt += entry.damage;
+                }
+            }
+        }
+
+        // Clear targets pointing to destroyed units (separate pass to avoid borrow conflicts)
+        for destroyed_id in &destroyed_unit_ids {
+            for unit in self.units.iter_mut() {
+                if unit.target_id == Some(*destroyed_id) {
+                    unit.target_id = None;
                 }
             }
         }
