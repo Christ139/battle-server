@@ -8,6 +8,8 @@
 // 5. Added target validity checking (range, alive status)
 // 6. Auto-movement for units with no player input (offline users)
 // 7. FIXED: Borrow checker error in damage processing section
+// 8. Added stalemate detection (60 seconds no combat = battle ends)
+// 9. Added battlefield-wide fallback targeting when no nearby targets found
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
@@ -25,6 +27,10 @@ const RETARGET_INTERVAL: u64 = 40;
 /// Distance threshold for considering a position change "significant"
 /// If a unit moves more than this, clear its target
 const SIGNIFICANT_MOVEMENT_THRESHOLD: f32 = 50.0;
+
+/// How many ticks without combat before declaring stalemate
+/// 1200 ticks = 60 seconds at 20 ticks/sec
+const STALEMATE_TICKS: u64 = 1200;
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
@@ -65,6 +71,8 @@ pub struct BattleSimulator {
     grid: SpatialGrid,
     tick: u64,
     damage_queue: Vec<DamageEntry>,
+    /// Track last tick when damage was dealt (for stalemate detection)
+    last_combat_tick: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +134,7 @@ impl BattleSimulator {
             grid: SpatialGrid::new(100.0),
             tick: 0,
             damage_queue: Vec::new(),
+            last_combat_tick: 0,
         }
     }
 
@@ -262,6 +271,37 @@ impl BattleSimulator {
         }
     }
 
+    /// Find ANY enemy on the battlefield (fallback when spatial grid finds nothing)
+    /// Returns the index of the nearest enemy unit
+    fn find_any_enemy(&self, attacker_idx: usize) -> Option<usize> {
+        let attacker = &self.units[attacker_idx];
+        
+        let mut best_idx: Option<usize> = None;
+        let mut best_dist_sq = f32::MAX;
+        
+        for (idx, other) in self.units.iter().enumerate() {
+            // Skip self, dead, allies
+            if idx == attacker_idx || !other.alive || other.faction_id == attacker.faction_id {
+                continue;
+            }
+            
+            let dist_sq = attacker.distance_sq(other);
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best_idx = Some(idx);
+            }
+        }
+        
+        if best_idx.is_some() {
+            log(&format!(
+                "[Targeting] Unit {} fallback search found enemy at distance {:.1}",
+                attacker.id, best_dist_sq.sqrt()
+            ));
+        }
+        
+        best_idx
+    }
+
     /// Main simulation tick
     pub fn simulate_tick(&mut self, dt: f32, current_time: f64) -> TickResult {
         self.tick += 1;
@@ -305,7 +345,7 @@ impl BattleSimulator {
                 // Clear old target
                 self.units[idx].target_id = None;
                 
-                // Find new target
+                // Find new target using spatial grid
                 if let Some(enemy_idx) = find_best_target(&self.units[idx], &self.units, &self.grid) {
                     let old_target = current_target;
                     let new_target = self.units[enemy_idx].id;
@@ -317,6 +357,13 @@ impl BattleSimulator {
                             "[Target] Unit {} retargeted: {:?} -> {}",
                             self.units[idx].id, old_target, new_target
                         ));
+                    }
+                } else {
+                    // Spatial grid found nothing - do battlefield-wide search
+                    // This catches enemies that are far away (e.g., unarmed Builder ships)
+                    if let Some(enemy_idx) = self.find_any_enemy(idx) {
+                        let new_target = self.units[enemy_idx].id;
+                        self.units[idx].target_id = Some(new_target);
                     }
                 }
             }
@@ -479,7 +526,7 @@ impl BattleSimulator {
         }
 
         // 5. Process damage queue
-        // ✅ FIXED: Restructured to avoid double mutable borrow
+        // FIXED: Restructured to avoid double mutable borrow
         let mut damage_by_target: HashMap<usize, f32> = HashMap::new();
         for entry in &self.damage_queue {
             *damage_by_target.entry(entry.target_idx).or_insert(0.0) += entry.damage;
@@ -545,7 +592,12 @@ impl BattleSimulator {
             }
         }
 
-        // 7. Build result
+        // 7. Update stalemate tracking - if any damage was dealt, reset counter
+        if !damaged.is_empty() || !destroyed.is_empty() {
+            self.last_combat_tick = self.tick;
+        }
+
+        // 8. Build result
         TickResult {
             moved,
             damaged,
@@ -579,8 +631,36 @@ impl BattleSimulator {
         factions
     }
 
+    /// Check if battle is in stalemate (no combat for STALEMATE_TICKS)
+    pub fn is_stalemate(&self) -> bool {
+        // Need at least some ticks to have passed
+        if self.tick < STALEMATE_TICKS {
+            return false;
+        }
+        
+        // If multiple factions exist but no combat for a while, it's a stalemate
+        let factions = self.get_active_factions();
+        if factions.len() > 1 && (self.tick - self.last_combat_tick) >= STALEMATE_TICKS {
+            log(&format!(
+                "[Simulator] Stalemate detected! {} ticks since last combat (threshold: {})",
+                self.tick - self.last_combat_tick, STALEMATE_TICKS
+            ));
+            return true;
+        }
+        
+        false
+    }
+
     pub fn is_battle_ended(&self) -> bool {
-        self.get_active_factions().len() <= 1
+        // Battle ends if: only one faction remains OR stalemate detected
+        let factions = self.get_active_factions();
+        
+        if factions.len() <= 1 {
+            return true;
+        }
+        
+        // Check for stalemate
+        self.is_stalemate()
     }
 
     pub fn get_results(&self) -> Vec<BattleUnit> {
@@ -607,9 +687,31 @@ impl BattleSimulator {
 
     pub fn get_winner(&self) -> Option<u32> {
         let factions = self.get_active_factions();
+        
         if factions.len() == 1 {
+            // Clear winner - only one faction remains
             Some(factions[0])
+        } else if factions.len() > 1 && self.is_stalemate() {
+            // Stalemate - faction with most units wins
+            let counts = self.get_faction_counts();
+            let mut best_faction: Option<u32> = None;
+            let mut best_count: usize = 0;
+            
+            for (faction, count) in counts {
+                if count > best_count {
+                    best_count = count;
+                    best_faction = Some(faction);
+                }
+            }
+            
+            log(&format!(
+                "[Simulator] Stalemate winner: faction {:?} with {} units",
+                best_faction, best_count
+            ));
+            
+            best_faction
         } else {
+            // Battle ongoing, no winner yet
             None
         }
     }
