@@ -8,8 +8,8 @@
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
-use crate::targeting::{find_best_target, find_siege_target};
-use crate::weapons::{try_fire_weapon, is_siege_weapon, is_point_defense};
+use crate::targeting::find_best_target;
+use crate::weapons::{try_fire_weapon, is_point_defense};
 use crate::log;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
@@ -372,6 +372,49 @@ impl BattleSimulator {
         }
     }
 
+    // ========================================================================
+    // METHODS REQUIRED BY lib.rs (DO NOT RENAME)
+    // ========================================================================
+
+    /// Add unit mid-battle (required by lib.rs)
+    pub fn add_unit(&mut self, unit: BattleUnit) {
+        log(&format!(
+            "[Simulator] Adding unit {} (faction={}, ship={}, station={})",
+            unit.id, unit.faction_id, unit.is_ship, unit.is_station
+        ));
+        self.units.push(unit);
+    }
+
+    /// Get active factions (required by lib.rs)
+    /// Returns Vec of unique faction IDs that still have alive units
+    pub fn get_active_factions(&self) -> Vec<u32> {
+        let mut factions: Vec<u32> = self.units
+            .iter()
+            .filter(|u| u.alive)
+            .map(|u| u.faction_id)
+            .collect();
+
+        factions.sort();
+        factions.dedup();
+        factions
+    }
+
+    /// Check if battle ended (required by lib.rs)
+    /// Battle ends when only one faction (or none) remains
+    pub fn is_battle_ended(&self) -> bool {
+        self.get_active_factions().len() <= 1
+    }
+
+    /// Get battle results (required by lib.rs)
+    /// Returns clone of all units with their final states
+    pub fn get_results(&self) -> Vec<BattleUnit> {
+        self.units.clone()
+    }
+
+    // ========================================================================
+    // ADDITIONAL HELPER METHODS
+    // ========================================================================
+
     /// Get current unit states (for checkpointing)
     pub fn get_units(&self) -> &[BattleUnit] {
         &self.units
@@ -388,17 +431,16 @@ impl BattleSimulator {
         counts
     }
 
-    /// Check if battle is over (one faction remaining)
+    /// Check if battle is over (alias for is_battle_ended)
     pub fn is_battle_over(&self) -> bool {
-        let counts = self.get_faction_counts();
-        counts.len() <= 1
+        self.is_battle_ended()
     }
 
     /// Get winning faction ID (if battle is over)
     pub fn get_winner(&self) -> Option<u32> {
-        let counts = self.get_faction_counts();
-        if counts.len() == 1 {
-            counts.keys().next().copied()
+        let factions = self.get_active_factions();
+        if factions.len() == 1 {
+            Some(factions[0])
         } else {
             None
         }
