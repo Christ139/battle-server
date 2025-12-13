@@ -163,7 +163,8 @@ impl BattleSimulator {
 
     /// Update a single unit's position
     /// Returns true if unit was found and updated
-    pub fn update_single_position(&mut self, unit_id: u32, x: f32, y: f32, z: f32, clear_target: bool) -> bool {
+    /// NOTE: External position updates ALWAYS clear target - unit will re-evaluate at new position
+    pub fn update_single_position(&mut self, unit_id: u32, x: f32, y: f32, z: f32, _clear_target: bool) -> bool {
         if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit_id && u.alive) {
             let old_x = unit.pos_x;
             let old_y = unit.pos_y;
@@ -179,22 +180,20 @@ impl BattleSimulator {
             unit.vel_y = 0.0;
             unit.vel_z = 0.0;
             
-            // Calculate movement distance
+            // Calculate movement distance for logging
             let dx = x - old_x;
             let dy = y - old_y;
             let dz = z - old_z;
             let move_dist = (dx * dx + dy * dy + dz * dz).sqrt();
             
-            // Clear target if requested OR if movement was significant
-            if clear_target || move_dist > SIGNIFICANT_MOVEMENT_THRESHOLD {
+            // ALWAYS clear target on external position update
+            // Unit will re-acquire nearest target in range on next tick
+            if unit.target_id.is_some() && move_dist > 0.1 {
+                log(&format!(
+                    "[Position] Unit {} moved {:.1} units, clearing target for re-evaluation",
+                    unit_id, move_dist
+                ));
                 unit.target_id = None;
-                
-                if move_dist > SIGNIFICANT_MOVEMENT_THRESHOLD {
-                    log(&format!(
-                        "[Position] Unit {} moved significantly ({:.1} units), clearing target",
-                        unit_id, move_dist
-                    ));
-                }
             }
             
             true
