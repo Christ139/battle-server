@@ -1,25 +1,44 @@
-// battle-core/src/simulator.rs - COMPLETE FIXED VERSION
+// battle-core/src/simulator.rs
 //
-// FIXES APPLIED:
-// 1. Clear dead targets so units can retarget
-// 2. Use weapon INDEX instead of tag for cooldown tracking (fixes duplicate weapons)
+// ✅ UPDATES:
+// 1. Pass current_tick to try_fire_weapon for sequence firing
+// 2. Use new targeting with ship-vs-station priority
+// 3. Support for siege weapons (nukes) with find_siege_target
+// 4. Framework for AM interception (future)
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
-use crate::targeting::find_best_target;
-use crate::weapons::try_fire_weapon;
+use crate::targeting::{find_best_target, find_siege_target};
+use crate::weapons::{try_fire_weapon, is_siege_weapon, is_point_defense};
 use crate::log;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
-    match weapon_tag {
-        "laser" | "beam" => f32::INFINITY,
-        "missile" => 300.0,
-        "torpedo" => 150.0,
-        _ => 800.0,
+    let tag_lower = weapon_tag.to_lowercase();
+    
+    // Energy weapons are instant
+    if tag_lower.contains("laser") || tag_lower.contains("ion") || tag_lower.contains("beam") {
+        return f32::INFINITY;
     }
+    
+    // Missiles and rockets
+    if tag_lower.contains("missile") || tag_lower.starts_with("hm") || tag_lower.starts_with("sm") {
+        return 50.0;  // Scaled down with ranges
+    }
+    
+    if tag_lower.contains("rocket") || tag_lower.starts_with("pr") || tag_lower.starts_with("cr") {
+        return 80.0;
+    }
+    
+    // Nukes are slow
+    if tag_lower.contains("nuke") || tag_lower.starts_with("nm") {
+        return 30.0;
+    }
+    
+    // Default for kinetics
+    100.0
 }
 
 /// Calculate impact time in milliseconds
@@ -28,7 +47,7 @@ fn calculate_impact_time(distance: f32, weapon_tag: &str) -> u32 {
     if speed.is_infinite() {
         0
     } else {
-        (distance / speed * 1000.0) as u32
+        ((distance / speed) * 1000.0) as u32
     }
 }
 
@@ -86,9 +105,18 @@ pub struct DamagedUnit {
 
 impl BattleSimulator {
     pub fn new(units: Vec<BattleUnit>) -> Self {
+        // Log unit composition on creation
+        let ships = units.iter().filter(|u| u.is_ship).count();
+        let stations = units.iter().filter(|u| u.is_station).count();
+        let armed = units.iter().filter(|u| u.has_weapons).count();
+        log(&format!(
+            "[Simulator] Created with {} units: {} ships, {} stations, {} armed",
+            units.len(), ships, stations, armed
+        ));
+
         Self {
             units,
-            grid: SpatialGrid::new(1000.0),
+            grid: SpatialGrid::new(100.0),  // Scaled down cell size to match new ranges
             tick: 0,
             damage_queue: Vec::new(),
         }
@@ -102,10 +130,10 @@ impl BattleSimulator {
         if self.tick % 20 == 0 {
             let alive_count = self.units.iter().filter(|u| u.alive).count();
             let with_targets = self.units.iter().filter(|u| u.alive && u.target_id.is_some()).count();
-            let with_weapons = self.units.iter().filter(|u| u.alive && !u.weapons.is_empty()).count();
+            let with_weapons = self.units.iter().filter(|u| u.alive && u.has_weapons).count();
             log(&format!(
-                "[Simulator] Tick {}: alive={}, with_targets={}, with_weapons={}, dt={:.3}s, time={:.1}",
-                self.tick, alive_count, with_targets, with_weapons, dt, current_time
+                "[Simulator] Tick {}: alive={}, with_targets={}, with_weapons={}, dt={:.3}s",
+                self.tick, alive_count, with_targets, with_weapons, dt
             ));
         }
 
@@ -119,7 +147,7 @@ impl BattleSimulator {
 
         // 2. Target acquisition - O(k) per unit
         for idx in 0..self.units.len() {
-            if !self.units[idx].alive {
+            if !self.units[idx].alive || !self.units[idx].has_weapons {
                 continue;
             }
 
@@ -132,8 +160,15 @@ impl BattleSimulator {
         }
 
         // 3. Movement - O(n)
+        let mut moved: Vec<MovedUnit> = Vec::new();
+        
         for idx in 0..self.units.len() {
             if !self.units[idx].alive {
+                continue;
+            }
+
+            // Stations don't move
+            if self.units[idx].is_station {
                 continue;
             }
 
@@ -146,15 +181,15 @@ impl BattleSimulator {
                 None
             };
 
-            // Get optimal range
+            // Get optimal range from first weapon
             let optimal_range = if !self.units[idx].weapons.is_empty() {
                 self.units[idx].weapons[0].optimal_range
             } else {
                 0.0
             };
 
-            // Now mutably update the unit
             let unit = &mut self.units[idx];
+            let old_pos = (unit.pos_x, unit.pos_y, unit.pos_z);
 
             if let Some((tx, ty, tz)) = target_pos {
                 let dx = tx - unit.pos_x;
@@ -166,27 +201,38 @@ impl BattleSimulator {
                     // Move towards target
                     unit.move_towards(tx, ty, tz);
                 } else if dist < optimal_range * 0.8 {
-                    // Back away
-                    if dist > 0.0 {
-                        let factor = unit.max_speed / dist;
-                        unit.vel_x = dx * factor * -1.0;
-                        unit.vel_y = dy * factor * -1.0;
-                        unit.vel_z = dz * factor * -1.0;
-                    }
+                    // Back away (too close)
+                    unit.move_away(tx, ty, tz);
                 } else {
                     // At optimal range, stop
                     unit.stop();
                 }
+            } else {
+                // No target, stop moving
+                unit.stop();
             }
 
             // Update position
             unit.update_position(dt);
+
+            // Track if moved significantly
+            let moved_dist = ((unit.pos_x - old_pos.0).powi(2) + 
+                             (unit.pos_y - old_pos.1).powi(2) + 
+                             (unit.pos_z - old_pos.2).powi(2)).sqrt();
+            
+            if moved_dist > 0.01 {
+                moved.push(MovedUnit {
+                    id: unit.id,
+                    x: unit.pos_x,
+                    y: unit.pos_y,
+                    z: unit.pos_z,
+                });
+            }
         }
 
         // 4. Combat - O(n) weapons
         self.damage_queue.clear();
 
-        // ✅ FIX 2: Updated signature to include weapon_idx instead of just tag
         // (attacker_idx, target_idx, damage, weapon_idx, distance, weapon_tag)
         let mut weapon_fires: Vec<(usize, usize, f32, usize, f32, String)> = Vec::new();
 
@@ -194,18 +240,12 @@ impl BattleSimulator {
         let mut units_checked_weapons = 0;
 
         for attacker_idx in 0..self.units.len() {
-            if !self.units[attacker_idx].alive {
+            if !self.units[attacker_idx].alive || !self.units[attacker_idx].has_weapons {
                 continue;
             }
 
             let attacker_target_id = self.units[attacker_idx].target_id;
             if attacker_target_id.is_none() {
-                if self.tick % 20 == 0 && attacker_idx == 0 {
-                    log(&format!(
-                        "[Combat] Unit {} has no target",
-                        self.units[attacker_idx].id
-                    ));
-                }
                 continue;
             }
             units_with_target += 1;
@@ -215,42 +255,32 @@ impl BattleSimulator {
             // Find target index
             let target_idx_opt = self.units.iter().position(|u| u.id == target_id && u.alive);
             if target_idx_opt.is_none() {
-                // ✅ FIX 1: Clear dead target so unit can acquire new one next tick
+                // Clear dead target so unit can acquire new one next tick
                 self.units[attacker_idx].target_id = None;
-
-                if self.tick % 20 == 0 {
-                    log(&format!(
-                        "[Combat] Unit {} target {} not found or dead - CLEARED for retargeting",
-                        self.units[attacker_idx].id, target_id
-                    ));
-                }
                 continue;
             }
             let target_idx = target_idx_opt.unwrap();
 
             // Check each weapon
-            let weapon_count = self.units[attacker_idx].weapons.len();
-            if weapon_count == 0 && self.tick % 20 == 0 && attacker_idx < 5 {
-                log(&format!(
-                    "[Combat] Unit {} has NO WEAPONS!",
-                    self.units[attacker_idx].id
-                ));
-            }
-
-            // ✅ FIX 2: Use enumerate to get weapon index
             for (weapon_idx, weapon) in self.units[attacker_idx].weapons.iter().enumerate() {
                 units_checked_weapons += 1;
+                
+                // Skip point defense weapons (handled separately)
+                if is_point_defense(weapon) {
+                    continue;
+                }
+
                 let attacker = &self.units[attacker_idx];
                 let target = &self.units[target_idx];
 
-                if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time) {
+                // ✅ UPDATED: Pass self.tick for sequence firing
+                if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time, self.tick) {
                     let distance = attacker.distance(target);
-                    // ✅ FIX 2: Store weapon_idx instead of just tag
                     weapon_fires.push((
                         attacker_idx,
                         target_idx,
                         damage,
-                        weapon_idx,  // ✅ NEW: Weapon index for tracking
+                        weapon_idx,
                         distance,
                         weapon.tag.clone()
                     ));
@@ -266,12 +296,11 @@ impl BattleSimulator {
             ));
         }
 
-        // Now update weapon cooldowns, queue damage, and build weapons_fired
+        // Process weapon fires
         let mut weapons_fired: Vec<WeaponFired> = Vec::new();
 
-        // ✅ FIX 2: Updated destructuring to include weapon_idx
         for (attacker_idx, target_idx, damage, weapon_idx, distance, weapon_tag) in weapon_fires {
-            // ✅ FIX 2: Update weapon cooldown by INDEX (not by tag search)
+            // Update weapon cooldown
             if weapon_idx < self.units[attacker_idx].weapons.len() {
                 self.units[attacker_idx].weapons[weapon_idx].last_fired = current_time;
             }
@@ -298,37 +327,18 @@ impl BattleSimulator {
             *damage_by_target.entry(entry.target_idx).or_insert(0.0) += entry.damage;
         }
 
-        // DEBUG: Log damage queue
-        if !self.damage_queue.is_empty() {
-            log(&format!(
-                "[Damage] Tick {}: Processing {} damage entries for {} targets",
-                self.tick, self.damage_queue.len(), damage_by_target.len()
-            ));
-        }
-
-        let mut destroyed = Vec::new();
-        let mut damaged = Vec::new();
+        let mut destroyed: Vec<u32> = Vec::new();
+        let mut damaged: Vec<DamagedUnit> = Vec::new();
 
         for (&target_idx, &total_damage) in &damage_by_target {
             let unit = &mut self.units[target_idx];
             let was_alive = unit.alive;
-            let hp_before = unit.hp;
-            let shield_before = unit.shield;
 
             unit.take_damage(total_damage);
 
-            // DEBUG: Log damage application
-            log(&format!(
-                "[Damage] Unit {}: took {:.1} dmg, HP {:.1}->{:.1}, Shield {:.1}->{:.1}, alive={}",
-                unit.id, total_damage, hp_before, unit.hp, shield_before, unit.shield, unit.alive
-            ));
-
             if was_alive && !unit.alive {
                 destroyed.push(unit.id);
-                log(&format!(
-                    "[Damage] Unit {} DESTROYED!",
-                    unit.id
-                ));
+                log(&format!("[Damage] Unit {} DESTROYED!", unit.id));
             } else if total_damage > 0.0 {
                 damaged.push(DamagedUnit {
                     id: unit.id,
@@ -352,18 +362,7 @@ impl BattleSimulator {
             }
         }
 
-        // 7. Collect moved units
-        let moved: Vec<MovedUnit> = self.units
-            .iter()
-            .filter(|u| u.alive && (u.vel_x.abs() > 0.1 || u.vel_y.abs() > 0.1 || u.vel_z.abs() > 0.1))
-            .map(|u| MovedUnit {
-                id: u.id,
-                x: u.pos_x,
-                y: u.pos_y,
-                z: u.pos_z,
-            })
-            .collect();
-
+        // 7. Build result
         TickResult {
             moved,
             damaged,
@@ -373,31 +372,35 @@ impl BattleSimulator {
         }
     }
 
-    /// Add unit mid-battle
-    pub fn add_unit(&mut self, unit: BattleUnit) {
-        self.units.push(unit);
+    /// Get current unit states (for checkpointing)
+    pub fn get_units(&self) -> &[BattleUnit] {
+        &self.units
     }
 
-    /// Get active factions
-    pub fn get_active_factions(&self) -> Vec<u32> {
-        let mut factions: Vec<u32> = self.units
-            .iter()
-            .filter(|u| u.alive)
-            .map(|u| u.faction_id)
-            .collect();
-
-        factions.sort();
-        factions.dedup();
-        factions
+    /// Get count of alive units per faction
+    pub fn get_faction_counts(&self) -> HashMap<u32, usize> {
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for unit in &self.units {
+            if unit.alive {
+                *counts.entry(unit.faction_id).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
-    /// Check if battle ended
-    pub fn is_battle_ended(&self) -> bool {
-        self.get_active_factions().len() <= 1
+    /// Check if battle is over (one faction remaining)
+    pub fn is_battle_over(&self) -> bool {
+        let counts = self.get_faction_counts();
+        counts.len() <= 1
     }
 
-    /// Get battle results
-    pub fn get_results(&self) -> Vec<BattleUnit> {
-        self.units.clone()
+    /// Get winning faction ID (if battle is over)
+    pub fn get_winner(&self) -> Option<u32> {
+        let counts = self.get_faction_counts();
+        if counts.len() == 1 {
+            counts.keys().next().copied()
+        } else {
+            None
+        }
     }
 }
