@@ -21,12 +21,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// How often to re-evaluate targets (in ticks)
-/// 40 ticks = 2 seconds at 20 ticks/sec
-const RETARGET_INTERVAL: u64 = 40;
+/// 20 ticks = 1 second at 20 ticks/sec
+const RETARGET_INTERVAL: u64 = 20;
 
 /// Distance threshold for considering a position change "significant"
-/// If a unit moves more than this, clear its target
-const SIGNIFICANT_MOVEMENT_THRESHOLD: f32 = 50.0;
+/// If a unit moves more than this, clear its target to re-evaluate
+const SIGNIFICANT_MOVEMENT_THRESHOLD: f32 = 10.0;
 
 /// How many ticks without combat before declaring stalemate
 /// 1200 ticks = 60 seconds at 20 ticks/sec
@@ -257,9 +257,13 @@ impl BattleSimulator {
                 return false;
             }
             
-            // Check if still in weapon range (with some buffer)
+            // Must be within weapon range - NO buffer, strict check
             let dist_sq = attacker.distance_sq(target);
-            let max_range = attacker.max_weapon_range * 1.5; // 50% buffer before invalidating
+            let max_range = attacker.max_weapon_range;
+            
+            if max_range <= 0.0 {
+                return false; // No weapons = can't attack
+            }
             
             if dist_sq > max_range * max_range {
                 return false;
@@ -271,11 +275,18 @@ impl BattleSimulator {
         }
     }
 
-    /// Find ANY enemy on the battlefield (fallback when spatial grid finds nothing)
-    /// Returns the index of the nearest enemy unit
+    /// Find enemy within weapon range (fallback when spatial grid finds nothing)
+    /// Returns the index of the nearest enemy unit WITHIN WEAPON RANGE ONLY
     fn find_any_enemy(&self, attacker_idx: usize) -> Option<usize> {
         let attacker = &self.units[attacker_idx];
+        let max_range = attacker.max_weapon_range;
         
+        // No weapons = can't target anything
+        if max_range <= 0.0 {
+            return None;
+        }
+        
+        let max_range_sq = max_range * max_range;
         let mut best_idx: Option<usize> = None;
         let mut best_dist_sq = f32::MAX;
         
@@ -286,7 +297,9 @@ impl BattleSimulator {
             }
             
             let dist_sq = attacker.distance_sq(other);
-            if dist_sq < best_dist_sq {
+            
+            // ✅ ONLY target enemies within weapon range
+            if dist_sq <= max_range_sq && dist_sq < best_dist_sq {
                 best_dist_sq = dist_sq;
                 best_idx = Some(idx);
             }
@@ -294,8 +307,8 @@ impl BattleSimulator {
         
         if best_idx.is_some() {
             log(&format!(
-                "[Targeting] Unit {} fallback search found enemy at distance {:.1}",
-                attacker.id, best_dist_sq.sqrt()
+                "[Targeting] Unit {} found enemy in range at distance {:.1} (max_range={:.1})",
+                attacker.id, best_dist_sq.sqrt(), max_range
             ));
         }
         
@@ -359,12 +372,12 @@ impl BattleSimulator {
                         ));
                     }
                 } else {
-                    // Spatial grid found nothing - do battlefield-wide search
-                    // This catches enemies that are far away (e.g., unarmed Builder ships)
+                    // Spatial grid found nothing nearby - search all units within weapon range
                     if let Some(enemy_idx) = self.find_any_enemy(idx) {
                         let new_target = self.units[enemy_idx].id;
                         self.units[idx].target_id = Some(new_target);
                     }
+                    // If still no target, unit has no enemies in weapon range - it will sit idle
                 }
             }
         }
