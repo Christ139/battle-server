@@ -4,8 +4,11 @@
  * Manages battle lifecycle using Rust WASM battle core
  * Handles tick loops, unit updates, and result persistence
  * 
- * FIX: Always emit tick events (even when empty) for client performance tracking
- * FIX: Emit survivors/casualties as arrays of unit IDs, not counts
+ * ✅ UPDATES:
+ * 1. Added updateUnitPositions() - sync external position changes to WASM
+ * 2. Added forceRetarget() - trigger target re-evaluation
+ * 3. Position updates trigger automatic re-targeting if movement is significant
+ * 4. All units now auto-move toward targets (supports offline player combat)
  */
 
 const { WasmBattleSimulator } = require('./battle-core/pkg/battle_core.js');
@@ -16,6 +19,9 @@ class BattleManager {
     this.battles = new Map(); // battleId -> BattleInstance
     this.tickInterval = null;
     this.TICK_RATE_MS = 50; // 20 ticks per second
+    
+    // Track pending position updates per battle
+    this.pendingPositionUpdates = new Map(); // battleId -> Map<unitId, {x,y,z}>
   }
 
   /**
@@ -29,7 +35,7 @@ class BattleManager {
     try {
       console.log(`[BattleManager] Starting battle ${battleId} in system ${systemId} with ${units.length} units`);
 
-      // DEBUG: Log unit data to check weapons
+      // DEBUG: Log unit data
       console.log(`[BattleManager] DEBUG: Checking unit data...`);
       for (const unit of units.slice(0, 3)) {
         console.log(`  Unit ${unit.id}: faction=${unit.faction_id}, weapons=${JSON.stringify(unit.weapons)}, pos=(${unit.pos_x?.toFixed(1)}, ${unit.pos_y?.toFixed(1)}, ${unit.pos_z?.toFixed(1)})`);
@@ -50,13 +56,16 @@ class BattleManager {
         tick: 0,
         startTime: Date.now(),
         lastTickTime: Date.now(),
-        units: units.map(u => u.id), // Track unit IDs
+        units: units.map(u => u.id),
         factions: [...new Set(units.map(u => u.faction_id))],
         ended: false,
         results: null
       };
 
       this.battles.set(battleId, battle);
+      
+      // Initialize pending position updates map for this battle
+      this.pendingPositionUpdates.set(battleId, new Map());
 
       // Emit battle started event
       this.io.to(`system:${systemId}`).emit('battle:started', {
@@ -76,6 +85,128 @@ class BattleManager {
 
     } catch (error) {
       console.error(`[BattleManager] Error starting battle ${battleId}:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ✅ NEW: Update unit positions from external source (player movement)
+   * 
+   * @param {string} battleId - Battle identifier
+   * @param {Array} positionUpdates - Array of {id, x, y, z, clearTarget?}
+   * @returns {Object} Result with updated count
+   */
+  updateUnitPositions(battleId, positionUpdates) {
+    const battle = this.battles.get(battleId);
+    if (!battle || battle.ended) {
+      return { success: false, error: 'Battle not found or ended' };
+    }
+
+    try {
+      // Convert to JSON and pass to WASM
+      const updatesJson = JSON.stringify(positionUpdates);
+      const updatedCount = battle.simulator.update_unit_positions(updatesJson);
+      
+      console.log(`[BattleManager] Updated ${updatedCount} unit positions in battle ${battleId}`);
+      
+      return { success: true, updated: updatedCount };
+    } catch (error) {
+      console.error(`[BattleManager] Error updating positions:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ✅ NEW: Update a single unit's position
+   * 
+   * @param {string} battleId - Battle identifier
+   * @param {number} unitId - Unit to update
+   * @param {number} x - New X position
+   * @param {number} y - New Y position
+   * @param {number} z - New Z position
+   * @param {boolean} clearTarget - If true, clear unit's current target
+   */
+  updateSingleUnitPosition(battleId, unitId, x, y, z, clearTarget = false) {
+    const battle = this.battles.get(battleId);
+    if (!battle || battle.ended) {
+      return { success: false, error: 'Battle not found or ended' };
+    }
+
+    try {
+      const result = battle.simulator.update_single_unit_position(unitId, x, y, z, clearTarget);
+      return { success: result };
+    } catch (error) {
+      console.error(`[BattleManager] Error updating single position:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ✅ NEW: Queue a position update for processing in next tick
+   * This allows batching multiple position updates
+   * 
+   * @param {string} battleId - Battle identifier  
+   * @param {number} unitId - Unit to update
+   * @param {number} x - New X position
+   * @param {number} y - New Y position
+   * @param {number} z - New Z position
+   */
+  queuePositionUpdate(battleId, unitId, x, y, z) {
+    const pending = this.pendingPositionUpdates.get(battleId);
+    if (!pending) return false;
+    
+    pending.set(unitId, { id: unitId, x, y, z, clear_target: false });
+    return true;
+  }
+
+  /**
+   * ✅ NEW: Process all pending position updates for a battle
+   */
+  processPendingPositionUpdates(battleId) {
+    const pending = this.pendingPositionUpdates.get(battleId);
+    if (!pending || pending.size === 0) return 0;
+
+    const updates = Array.from(pending.values());
+    pending.clear();
+
+    const result = this.updateUnitPositions(battleId, updates);
+    return result.updated || 0;
+  }
+
+  /**
+   * ✅ NEW: Force all units in a battle to re-evaluate their targets
+   */
+  forceRetarget(battleId) {
+    const battle = this.battles.get(battleId);
+    if (!battle || battle.ended) {
+      return { success: false, error: 'Battle not found or ended' };
+    }
+
+    try {
+      const count = battle.simulator.force_retarget();
+      console.log(`[BattleManager] Forced ${count} units to retarget in battle ${battleId}`);
+      return { success: true, retargeted: count };
+    } catch (error) {
+      console.error(`[BattleManager] Error forcing retarget:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ✅ NEW: Get current unit positions from WASM (for debugging)
+   */
+  getUnitPositions(battleId) {
+    const battle = this.battles.get(battleId);
+    if (!battle || battle.ended) {
+      return { success: false, error: 'Battle not found or ended' };
+    }
+
+    try {
+      const positionsJson = battle.simulator.get_unit_positions();
+      const positions = JSON.parse(positionsJson);
+      return { success: true, positions };
+    } catch (error) {
+      console.error(`[BattleManager] Error getting positions:`, error);
       return { success: false, error: error.message };
     }
   }
@@ -117,40 +248,36 @@ class BattleManager {
       if (battle.ended) continue;
 
       try {
+        // ✅ Process any pending position updates before the tick
+        this.processPendingPositionUpdates(battleId);
+
         // Calculate delta time
-        const dt = (now - battle.lastTickTime) / 1000; // Convert to seconds
+        const dt = (now - battle.lastTickTime) / 1000;
         battle.lastTickTime = now;
 
-        // Run simulation tick (returns JSON string)
+        // Run simulation tick
         const resultJson = battle.simulator.simulate_tick(dt, now / 1000);
         const tickResult = JSON.parse(resultJson);
 
         battle.tick++;
 
-        // DEBUG: Log combat activity
+        // DEBUG logging
         if (tickResult.weaponsFired?.length > 0) {
           console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.weaponsFired.length} weapons fired`);
-          for (const wf of tickResult.weaponsFired) {
-            console.log(`  -> Attacker ${wf.attackerId} fired ${wf.weaponType} at Target ${wf.targetId} (impact: ${wf.impactTime}ms)`);
-          }
-        }
-        if (tickResult.damaged?.length > 0) {
-          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.damaged.length} units damaged`);
-          for (const d of tickResult.damaged) {
-            console.log(`  -> Unit ${d.id}: HP=${d.hp.toFixed(1)}, Shield=${d.shield.toFixed(1)}`);
+          for (const wf of tickResult.weaponsFired.slice(0, 3)) {
+            console.log(`  -> Attacker ${wf.attackerId} fired ${wf.weaponType} at Target ${wf.targetId}`);
           }
         }
         if (tickResult.destroyed?.length > 0) {
           console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.destroyed.length} units DESTROYED: ${tickResult.destroyed.join(', ')}`);
         }
 
-        // DEBUG: Log every 20 ticks (1 second) with battle state summary
+        // Summary log every second
         if (battle.tick % 20 === 0) {
           console.log(`[Battle ${battleId}] Tick ${battle.tick} summary: moved=${tickResult.moved?.length || 0}, damaged=${tickResult.damaged?.length || 0}, destroyed=${tickResult.destroyed?.length || 0}, weaponsFired=${tickResult.weaponsFired?.length || 0}`);
         }
 
-        // FIX: ALWAYS emit tick events (even when empty) for client performance tracking
-        // This allows the client to measure tick rate, tick times, and know the simulation is running
+        // Always emit tick events
         this.io.to(`system:${battle.systemId}`).emit('battle:tick', {
           battleId,
           systemId: battle.systemId,
@@ -180,9 +307,6 @@ class BattleManager {
 
   /**
    * End a battle and get final results
-   *
-   * @param {string} battleId
-   * @param {Error} error - Optional error if battle crashed
    */
   endBattle(battleId, error = null) {
     const battle = this.battles.get(battleId);
@@ -191,7 +315,6 @@ class BattleManager {
     try {
       console.log(`[BattleManager] Ending battle ${battleId}`);
 
-      // Get final results from WASM
       const resultsJson = battle.simulator.get_results();
       const finalUnits = JSON.parse(resultsJson);
 
@@ -209,7 +332,6 @@ class BattleManager {
         error: error ? error.message : null
       };
 
-      // FIX: Emit survivors/casualties as arrays of unit IDs, not counts
       const survivors = finalUnits.filter(u => u.alive).map(u => u.id);
       const casualties = finalUnits.filter(u => !u.alive).map(u => u.id);
 
@@ -219,59 +341,45 @@ class BattleManager {
         systemId: battle.systemId,
         duration,
         totalTicks: battle.tick,
-        survivors,    // Now an array of unit IDs: [3094, 3095, 3096, ...]
-        casualties,   // Now an array of unit IDs: [3150, 3151, 3152, ...]
+        survivors,
+        casualties,
         victor: activeFactions.length === 1 ? activeFactions[0] : null
       });
 
-      console.log(`[BattleManager] Battle ${battleId} ended. Duration: ${duration}ms, Ticks: ${battle.tick}, Survivors: ${survivors.length}, Casualties: ${casualties.length}`);
+      console.log(`[BattleManager] Battle ${battleId} ended. Duration: ${duration}ms, Survivors: ${survivors.length}, Casualties: ${casualties.length}`);
 
-      // Keep battle in memory for 60 seconds for result queries
-      setTimeout(() => {
-        this.battles.delete(battleId);
-        console.log(`[BattleManager] Battle ${battleId} removed from memory`);
-      }, 60000);
+      // Clean up
+      this.pendingPositionUpdates.delete(battleId);
+      this.battles.delete(battleId);
 
-    } catch (error) {
-      console.error(`[BattleManager] Error ending battle ${battleId}:`, error);
-      battle.ended = true;
-      battle.results = { error: error.message };
+      return { success: true, results: battle.results };
+
+    } catch (err) {
+      console.error(`[BattleManager] Error ending battle ${battleId}:`, err);
+      this.battles.delete(battleId);
+      this.pendingPositionUpdates.delete(battleId);
+      return { success: false, error: err.message };
     }
   }
 
   /**
-   * Add reinforcements to an active battle
-   *
-   * @param {string} battleId
-   * @param {Array} units - New units to add
+   * Add reinforcements to an existing battle
    */
   addReinforcements(battleId, units) {
     const battle = this.battles.get(battleId);
     if (!battle || battle.ended) {
-      return { success: false, error: 'Battle not found or already ended' };
+      return { success: false, error: 'Battle not found or ended' };
     }
 
     try {
-      console.log(`[BattleManager] Adding ${units.length} reinforcements to battle ${battleId}`);
-
       for (const unit of units) {
         const unitJson = JSON.stringify(unit);
         battle.simulator.add_unit(unitJson);
         battle.units.push(unit.id);
       }
 
-      // Emit reinforcements event
-      this.io.to(`system:${battle.systemId}`).emit('battle:reinforcements', {
-        battleId,
-        systemId: battle.systemId,
-        reinforcements: units.map(u => ({
-          id: u.id,
-          faction_id: u.faction_id,
-          player_id: u.player_id
-        }))
-      });
-
-      return { success: true };
+      console.log(`[BattleManager] Added ${units.length} reinforcements to battle ${battleId}`);
+      return { success: true, added: units.length };
 
     } catch (error) {
       console.error(`[BattleManager] Error adding reinforcements:`, error);
@@ -280,77 +388,79 @@ class BattleManager {
   }
 
   /**
-   * Get battle status
-   *
-   * @param {string} battleId
-   */
-  getBattleStatus(battleId) {
-    const battle = this.battles.get(battleId);
-    if (!battle) {
-      return { found: false };
-    }
-
-    return {
-      found: true,
-      battleId: battle.battleId,
-      systemId: battle.systemId,
-      tick: battle.tick,
-      duration: Date.now() - battle.startTime,
-      ended: battle.ended,
-      unitCount: battle.units.length,
-      factions: battle.factions,
-      results: battle.results
-    };
-  }
-
-  /**
-   * Get all active battles
-   */
-  getActiveBattles() {
-    const active = [];
-    for (const [battleId, battle] of this.battles.entries()) {
-      if (!battle.ended) {
-        active.push({
-          battleId,
-          systemId: battle.systemId,
-          tick: battle.tick,
-          duration: Date.now() - battle.startTime,
-          unitCount: battle.units.length,
-          factions: battle.factions
-        });
-      }
-    }
-    return active;
-  }
-
-  /**
-   * Force stop a battle
-   *
-   * @param {string} battleId
+   * Stop a battle manually
    */
   stopBattle(battleId) {
+    return this.endBattle(battleId, new Error('Manually stopped'));
+  }
+
+  /**
+   * Get battle status
+   */
+  getBattleStatus(battleId) {
     const battle = this.battles.get(battleId);
     if (!battle) {
       return { success: false, error: 'Battle not found' };
     }
 
-    this.endBattle(battleId);
-    return { success: true };
+    try {
+      const activeFactions = JSON.parse(battle.simulator.get_active_factions());
+      const positions = battle.simulator.get_unit_positions();
+      
+      return {
+        success: true,
+        battleId,
+        systemId: battle.systemId,
+        tick: battle.tick,
+        duration: Date.now() - battle.startTime,
+        activeFactions,
+        ended: battle.ended,
+        units: JSON.parse(positions)
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   }
 
   /**
-   * Shutdown - clean up all battles
+   * Get list of active battles
+   */
+  getActiveBattles() {
+    return Array.from(this.battles.entries())
+      .filter(([_, b]) => !b.ended)
+      .map(([id, b]) => ({
+        battleId: id,
+        systemId: b.systemId,
+        tick: b.tick,
+        duration: Date.now() - b.startTime,
+        unitCount: b.units.length
+      }));
+  }
+
+  /**
+   * ✅ NEW: Find battle by system ID
+   */
+  getBattleBySystemId(systemId) {
+    for (const [battleId, battle] of this.battles.entries()) {
+      if (battle.systemId === systemId && !battle.ended) {
+        return { battleId, battle };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Shutdown manager
    */
   shutdown() {
-    console.log('[BattleManager] Shutting down...');
-
     this.stopTickLoop();
-
-    for (const battleId of this.battles.keys()) {
-      this.endBattle(battleId);
+    
+    for (const [battleId] of this.battles.entries()) {
+      this.endBattle(battleId, new Error('Server shutdown'));
     }
-
+    
     this.battles.clear();
+    this.pendingPositionUpdates.clear();
     console.log('[BattleManager] Shutdown complete');
   }
 }
