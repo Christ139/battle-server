@@ -1,50 +1,43 @@
 // battle-core/src/simulator.rs
 //
 // ✅ UPDATES:
-// 1. Added update_positions() - sync external position changes
-// 2. Added update_single_position() - update one unit's position
-// 3. Added force_retarget_all() and force_retarget_unit()
-// 4. Added periodic target re-evaluation (every 40 ticks = 2 seconds)
-// 5. Added target validity checking (range, alive status)
-// 6. Auto-movement for units with no player input (offline users)
+// 1. Pass current_tick to try_fire_weapon for sequence firing
+// 2. Use new targeting with ship-vs-station priority
+// 3. Support for siege weapons (nukes) with find_siege_target
+// 4. Framework for AM interception (future)
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
 use crate::targeting::find_best_target;
 use crate::weapons::{try_fire_weapon, is_point_defense};
 use crate::log;
-use crate::PositionUpdate;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-
-/// How often to re-evaluate targets (in ticks)
-/// 40 ticks = 2 seconds at 20 ticks/sec
-const RETARGET_INTERVAL: u64 = 40;
-
-/// Distance threshold for considering a position change "significant"
-/// If a unit moves more than this, clear its target
-const SIGNIFICANT_MOVEMENT_THRESHOLD: f32 = 50.0;
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
     let tag_lower = weapon_tag.to_lowercase();
     
+    // Energy weapons are instant
     if tag_lower.contains("laser") || tag_lower.contains("ion") || tag_lower.contains("beam") {
         return f32::INFINITY;
     }
     
+    // Missiles and rockets
     if tag_lower.contains("missile") || tag_lower.starts_with("hm") || tag_lower.starts_with("sm") {
-        return 50.0;
+        return 50.0;  // Scaled down with ranges
     }
     
     if tag_lower.contains("rocket") || tag_lower.starts_with("pr") || tag_lower.starts_with("cr") {
         return 80.0;
     }
     
+    // Nukes are slow
     if tag_lower.contains("nuke") || tag_lower.starts_with("nm") {
         return 30.0;
     }
     
+    // Default for kinetics
     100.0
 }
 
@@ -112,6 +105,7 @@ pub struct DamagedUnit {
 
 impl BattleSimulator {
     pub fn new(units: Vec<BattleUnit>) -> Self {
+        // Log unit composition on creation
         let ships = units.iter().filter(|u| u.is_ship).count();
         let stations = units.iter().filter(|u| u.is_station).count();
         let armed = units.iter().filter(|u| u.has_weapons).count();
@@ -122,142 +116,9 @@ impl BattleSimulator {
 
         Self {
             units,
-            grid: SpatialGrid::new(100.0),
+            grid: SpatialGrid::new(100.0),  // Scaled down cell size to match new ranges
             tick: 0,
             damage_queue: Vec::new(),
-        }
-    }
-
-    // =========================================================================
-    // ✅ NEW: External position update methods
-    // =========================================================================
-
-    /// Update multiple unit positions from external source (player movement)
-    /// Returns the number of units successfully updated
-    pub fn update_positions(&mut self, updates: &[PositionUpdate]) -> u32 {
-        let mut count = 0;
-        
-        for update in updates {
-            if self.update_single_position(update.id, update.x, update.y, update.z, update.clear_target) {
-                count += 1;
-            }
-        }
-        
-        // Rebuild spatial grid after position updates
-        if count > 0 {
-            self.rebuild_spatial_grid();
-        }
-        
-        count
-    }
-
-    /// Update a single unit's position
-    /// Returns true if unit was found and updated
-    pub fn update_single_position(&mut self, unit_id: u32, x: f32, y: f32, z: f32, clear_target: bool) -> bool {
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit_id && u.alive) {
-            let old_x = unit.pos_x;
-            let old_y = unit.pos_y;
-            let old_z = unit.pos_z;
-            
-            // Update position
-            unit.pos_x = x;
-            unit.pos_y = y;
-            unit.pos_z = z;
-            
-            // Stop any internal velocity since we're setting position externally
-            unit.vel_x = 0.0;
-            unit.vel_y = 0.0;
-            unit.vel_z = 0.0;
-            
-            // Calculate movement distance
-            let dx = x - old_x;
-            let dy = y - old_y;
-            let dz = z - old_z;
-            let move_dist = (dx * dx + dy * dy + dz * dz).sqrt();
-            
-            // Clear target if requested OR if movement was significant
-            if clear_target || move_dist > SIGNIFICANT_MOVEMENT_THRESHOLD {
-                unit.target_id = None;
-                
-                if move_dist > SIGNIFICANT_MOVEMENT_THRESHOLD {
-                    log(&format!(
-                        "[Position] Unit {} moved significantly ({:.1} units), clearing target",
-                        unit_id, move_dist
-                    ));
-                }
-            }
-            
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Rebuild spatial grid from current positions
-    fn rebuild_spatial_grid(&mut self) {
-        self.grid.clear();
-        for (idx, unit) in self.units.iter().enumerate() {
-            if unit.alive {
-                self.grid.insert(idx, unit.pos_x, unit.pos_y, unit.pos_z);
-            }
-        }
-    }
-
-    /// Force all units to re-evaluate their targets
-    /// Returns the number of units that changed targets
-    pub fn force_retarget_all(&mut self) -> u32 {
-        let mut changed = 0;
-        
-        // First pass: clear all targets
-        for unit in self.units.iter_mut() {
-            if unit.alive && unit.target_id.is_some() {
-                unit.target_id = None;
-                changed += 1;
-            }
-        }
-        
-        log(&format!("[Retarget] Cleared {} unit targets, will re-acquire next tick", changed));
-        
-        changed
-    }
-
-    /// Force a specific unit to re-evaluate its target
-    pub fn force_retarget_unit(&mut self, unit_id: u32) -> bool {
-        if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit_id && u.alive) {
-            unit.target_id = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if a target is still valid (alive, in range)
-    fn is_target_valid(&self, attacker_idx: usize, target_id: u32) -> bool {
-        let attacker = &self.units[attacker_idx];
-        
-        // Find target
-        if let Some(target) = self.units.iter().find(|u| u.id == target_id) {
-            // Must be alive
-            if !target.alive {
-                return false;
-            }
-            
-            // Must be enemy
-            if target.faction_id == attacker.faction_id {
-                return false;
-            }
-            
-            // Check if still in weapon range (with some buffer)
-            let dist_sq = attacker.distance_sq(target);
-            let max_range = attacker.max_weapon_range * 1.5; // 50% buffer before invalidating
-            
-            if dist_sq > max_range * max_range {
-                return false;
-            }
-            
-            true
-        } else {
-            false
         }
     }
 
@@ -284,45 +145,21 @@ impl BattleSimulator {
             }
         }
 
-        // 2. Target acquisition and validation - O(k) per unit
-        // ✅ UPDATED: Now validates existing targets and periodically re-evaluates
+        // 2. Target acquisition - O(k) per unit
         for idx in 0..self.units.len() {
             if !self.units[idx].alive || !self.units[idx].has_weapons {
                 continue;
             }
 
-            let current_target = self.units[idx].target_id;
-            let should_retarget = 
-                // No target
-                current_target.is_none() ||
-                // Periodic re-evaluation (every RETARGET_INTERVAL ticks)
-                (self.tick % RETARGET_INTERVAL == 0) ||
-                // Current target is no longer valid
-                (current_target.is_some() && !self.is_target_valid(idx, current_target.unwrap()));
-
-            if should_retarget {
-                // Clear old target
-                self.units[idx].target_id = None;
-                
-                // Find new target
+            // Find target if don't have one
+            if self.units[idx].target_id.is_none() {
                 if let Some(enemy_idx) = find_best_target(&self.units[idx], &self.units, &self.grid) {
-                    let old_target = current_target;
-                    let new_target = self.units[enemy_idx].id;
-                    self.units[idx].target_id = Some(new_target);
-                    
-                    // Log target changes
-                    if old_target.is_some() && old_target != Some(new_target) && self.units[idx].id % 50 == 0 {
-                        log(&format!(
-                            "[Target] Unit {} retargeted: {:?} -> {}",
-                            self.units[idx].id, old_target, new_target
-                        ));
-                    }
+                    self.units[idx].target_id = Some(self.units[enemy_idx].id);
                 }
             }
         }
 
         // 3. Movement - O(n)
-        // ✅ UPDATED: Auto-movement for all units (including those owned by offline players)
         let mut moved: Vec<MovedUnit> = Vec::new();
         
         for idx in 0..self.units.len() {
@@ -396,7 +233,9 @@ impl BattleSimulator {
         // 4. Combat - O(n) weapons
         self.damage_queue.clear();
 
+        // (attacker_idx, target_idx, damage, weapon_idx, distance, weapon_tag)
         let mut weapon_fires: Vec<(usize, usize, f32, usize, f32, String)> = Vec::new();
+
         let mut units_with_target = 0;
         let mut units_checked_weapons = 0;
 
@@ -426,6 +265,7 @@ impl BattleSimulator {
             for (weapon_idx, weapon) in self.units[attacker_idx].weapons.iter().enumerate() {
                 units_checked_weapons += 1;
                 
+                // Skip point defense weapons (handled separately)
                 if is_point_defense(weapon) {
                     continue;
                 }
@@ -433,6 +273,7 @@ impl BattleSimulator {
                 let attacker = &self.units[attacker_idx];
                 let target = &self.units[target_idx];
 
+                // ✅ UPDATED: Pass self.tick for sequence firing
                 if let Some(damage) = try_fire_weapon(attacker, target, weapon, current_time, self.tick) {
                     let distance = attacker.distance(target);
                     weapon_fires.push((
@@ -459,16 +300,19 @@ impl BattleSimulator {
         let mut weapons_fired: Vec<WeaponFired> = Vec::new();
 
         for (attacker_idx, target_idx, damage, weapon_idx, distance, weapon_tag) in weapon_fires {
+            // Update weapon cooldown
             if weapon_idx < self.units[attacker_idx].weapons.len() {
                 self.units[attacker_idx].weapons[weapon_idx].last_fired = current_time;
             }
 
+            // Queue damage
             self.damage_queue.push(DamageEntry {
                 target_idx,
                 damage,
                 attacker_idx,
             });
 
+            // Add to weapons_fired for client
             weapons_fired.push(WeaponFired {
                 attacker_id: self.units[attacker_idx].id,
                 target_id: self.units[target_idx].id,
@@ -477,7 +321,7 @@ impl BattleSimulator {
             });
         }
 
-        // 5. Process damage queue
+        // 5. Process damage queue - O(n) targets
         let mut damage_by_target: HashMap<usize, f32> = HashMap::new();
         for entry in &self.damage_queue {
             *damage_by_target.entry(entry.target_idx).or_insert(0.0) += entry.damage;
@@ -495,13 +339,6 @@ impl BattleSimulator {
             if was_alive && !unit.alive {
                 destroyed.push(unit.id);
                 log(&format!("[Damage] Unit {} DESTROYED!", unit.id));
-                
-                // ✅ IMPORTANT: Clear targets pointing to destroyed unit
-                for other in self.units.iter_mut() {
-                    if other.target_id == Some(unit.id) {
-                        other.target_id = None;
-                    }
-                }
             } else if total_damage > 0.0 {
                 damaged.push(DamagedUnit {
                     id: unit.id,
@@ -510,6 +347,7 @@ impl BattleSimulator {
                 });
             }
 
+            // Track attacker damage dealt
             for entry in &self.damage_queue {
                 if entry.target_idx == target_idx {
                     self.units[entry.attacker_idx].damage_dealt += entry.damage;
@@ -517,7 +355,7 @@ impl BattleSimulator {
             }
         }
 
-        // 6. Shield regen
+        // 6. Shield regen - O(n)
         for unit in self.units.iter_mut() {
             if unit.alive {
                 unit.regen_shield(dt);
@@ -534,10 +372,11 @@ impl BattleSimulator {
         }
     }
 
-    // =========================================================================
-    // Existing methods (required by lib.rs)
-    // =========================================================================
+    // ========================================================================
+    // METHODS REQUIRED BY lib.rs (DO NOT RENAME)
+    // ========================================================================
 
+    /// Add unit mid-battle (required by lib.rs)
     pub fn add_unit(&mut self, unit: BattleUnit) {
         log(&format!(
             "[Simulator] Adding unit {} (faction={}, ship={}, station={})",
@@ -546,6 +385,8 @@ impl BattleSimulator {
         self.units.push(unit);
     }
 
+    /// Get active factions (required by lib.rs)
+    /// Returns Vec of unique faction IDs that still have alive units
     pub fn get_active_factions(&self) -> Vec<u32> {
         let mut factions: Vec<u32> = self.units
             .iter()
@@ -558,18 +399,28 @@ impl BattleSimulator {
         factions
     }
 
+    /// Check if battle ended (required by lib.rs)
+    /// Battle ends when only one faction (or none) remains
     pub fn is_battle_ended(&self) -> bool {
         self.get_active_factions().len() <= 1
     }
 
+    /// Get battle results (required by lib.rs)
+    /// Returns clone of all units with their final states
     pub fn get_results(&self) -> Vec<BattleUnit> {
         self.units.clone()
     }
 
+    // ========================================================================
+    // ADDITIONAL HELPER METHODS
+    // ========================================================================
+
+    /// Get current unit states (for checkpointing)
     pub fn get_units(&self) -> &[BattleUnit] {
         &self.units
     }
 
+    /// Get count of alive units per faction
     pub fn get_faction_counts(&self) -> HashMap<u32, usize> {
         let mut counts: HashMap<u32, usize> = HashMap::new();
         for unit in &self.units {
@@ -580,10 +431,12 @@ impl BattleSimulator {
         counts
     }
 
+    /// Check if battle is over (alias for is_battle_ended)
     pub fn is_battle_over(&self) -> bool {
         self.is_battle_ended()
     }
 
+    /// Get winning faction ID (if battle is over)
     pub fn get_winner(&self) -> Option<u32> {
         let factions = self.get_active_factions();
         if factions.len() == 1 {
