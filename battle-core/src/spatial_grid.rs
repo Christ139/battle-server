@@ -37,18 +37,21 @@ impl SpatialGrid {
     }
 
     /// Get nearby unit indices - O(k) where k = units in nearby cells
-    /// 
-    /// Checks 27 cells (3x3x3 cube)
-    pub fn get_nearby(&self, x: f32, y: f32, z: f32, _range: f32) -> Vec<usize> {
+    ///
+    /// Dynamically expands search radius based on range parameter
+    pub fn get_nearby(&self, x: f32, y: f32, z: f32, range: f32) -> Vec<usize> {
         let (cx, cy, cz) = self.get_key(x, y, z);
         let mut result = Vec::new();
 
-        // Check 3x3x3 cube of cells
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
+        // Calculate how many cells to search based on range
+        // Add 1 to ensure we cover edge cases
+        let cells_needed = ((range * self.inv_cell_size).ceil() as i32).max(1);
+
+        for dx in -cells_needed..=cells_needed {
+            for dy in -cells_needed..=cells_needed {
+                for dz in -cells_needed..=cells_needed {
                     let key = (cx + dx, cy + dy, cz + dz);
-                    
+
                     if let Some(cell) = self.cells.get(&key) {
                         for &idx in cell {
                             result.push(idx);

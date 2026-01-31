@@ -154,13 +154,19 @@ pub struct IdleInfo {
 }
 
 impl BattleSimulator {
-    pub fn new(units: Vec<BattleUnit>) -> Self {
+    pub fn new(mut units: Vec<BattleUnit>) -> Self {
+        // Normalize all units to compute derived fields
+        for unit in units.iter_mut() {
+            unit.normalize();
+        }
+
         let ships = units.iter().filter(|u| u.is_ship).count();
         let stations = units.iter().filter(|u| u.is_station).count();
         let armed = units.iter().filter(|u| u.has_weapons).count();
+        let max_range = units.iter().map(|u| u.max_weapon_range).fold(0.0f32, |a, b| a.max(b));
         log(&format!(
-            "[Simulator] Created with {} units: {} ships, {} stations, {} armed",
-            units.len(), ships, stations, armed
+            "[Simulator] Created with {} units: {} ships, {} stations, {} armed, max_range={:.0}",
+            units.len(), ships, stations, armed, max_range
         ));
 
         Self {
@@ -765,10 +771,12 @@ impl BattleSimulator {
     // Existing methods (required by lib.rs)
     // =========================================================================
 
-    pub fn add_unit(&mut self, unit: BattleUnit) {
+    pub fn add_unit(&mut self, mut unit: BattleUnit) {
+        // Normalize unit data
+        unit.normalize();
         log(&format!(
-            "[Simulator] Adding unit {} (faction={}, ship={}, station={})",
-            unit.id, unit.faction_id, unit.is_ship, unit.is_station
+            "[Simulator] Adding unit {} (faction={}, ship={}, station={}, has_weapons={}, max_range={:.0})",
+            unit.id, unit.faction_id, unit.is_ship, unit.is_station, unit.has_weapons, unit.max_weapon_range
         ));
         self.units.push(unit);
         // ✅ NEW: Wake from idle when adding units

@@ -229,6 +229,33 @@ impl BattleUnit {
     pub fn is_valid_target(&self) -> bool {
         self.alive
     }
+
+    /// Normalize unit data after deserialization
+    /// Computes derived fields if they weren't sent by the game server
+    pub fn normalize(&mut self) {
+        // Compute has_weapons from weapons array if not set
+        if !self.has_weapons && !self.weapons.is_empty() {
+            self.has_weapons = true;
+        }
+
+        // Compute max_weapon_range from weapons if not set
+        if self.max_weapon_range <= 0.0 && !self.weapons.is_empty() {
+            self.max_weapon_range = self.weapons.iter()
+                .map(|w| w.max_range)
+                .fold(0.0f32, |a, b| a.max(b));
+        }
+
+        // Infer is_ship/is_station from unit_type if neither is set
+        if !self.is_ship && !self.is_station {
+            let unit_type_lower = self.unit_type.to_lowercase();
+            if unit_type_lower.contains("station") || unit_type_lower.contains("outpost") || unit_type_lower.contains("platform") {
+                self.is_station = true;
+            } else {
+                // Default to ship for any non-station unit
+                self.is_ship = true;
+            }
+        }
+    }
 }
 
 impl Default for BattleUnit {
