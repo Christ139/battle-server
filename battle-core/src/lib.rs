@@ -4,6 +4,7 @@
 // 1. Added update_unit_positions() - sync external position changes during battle
 // 2. Added force_retarget() - force units to re-evaluate targets
 // 3. Added update_single_unit_position() - update a single unit's position
+// 4. ✅ NEW: Added is_idle() and get_idle_info() for idle mode optimization
 
 mod spatial_grid;
 mod battle_unit;
@@ -153,5 +154,31 @@ impl WasmBattleSimulator {
         
         serde_json::to_string(&positions)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize positions: {}", e)))
+    }
+
+    // =========================================================================
+    // ✅ NEW: Idle mode methods
+    // =========================================================================
+
+    /// Check if simulator is currently in idle mode
+    #[wasm_bindgen]
+    pub fn is_idle(&self) -> bool {
+        self.simulator.is_currently_idle()
+    }
+
+    /// Get next weapon ready time (unix timestamp in seconds)
+    /// JS can use this to know when to wake the battle
+    #[wasm_bindgen]
+    pub fn get_next_weapon_ready_time(&self) -> f64 {
+        self.simulator.get_next_weapon_ready_time()
+    }
+
+    /// Get detailed idle info - returns JSON
+    /// { isIdle, ticksSinceMovement, nextWeaponReadyTime, idleTickCount }
+    #[wasm_bindgen]
+    pub fn get_idle_info(&self, current_time: f64) -> Result<String, JsValue> {
+        let info = self.simulator.get_idle_info(current_time);
+        serde_json::to_string(&info)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize idle info: {}", e)))
     }
 }

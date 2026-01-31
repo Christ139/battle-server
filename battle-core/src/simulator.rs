@@ -10,6 +10,10 @@
 // 7. FIXED: Borrow checker error in damage processing section
 // 8. Added stalemate detection (60 seconds no combat = battle ends)
 // 9. Added battlefield-wide fallback targeting when no nearby targets found
+// 10. ✅ NEW: IDLE MODE - Skip expensive processing when no movement and weapons on cooldown
+//     - Tracks last_movement_tick and next_weapon_ready_time
+//     - When idle: only does shield regen, skips targeting/weapons/spatial grid
+//     - Wakes automatically when movement received or weapon cooldown expires
 
 use crate::spatial_grid::SpatialGrid;
 use crate::battle_unit::BattleUnit;
@@ -31,6 +35,10 @@ const SIGNIFICANT_MOVEMENT_THRESHOLD: f32 = 10.0;
 /// How many ticks without combat before declaring stalemate
 /// 1200 ticks = 60 seconds at 20 ticks/sec
 const STALEMATE_TICKS: u64 = 1200;
+
+/// ✅ NEW: How many ticks after movement before entering idle mode
+/// 40 ticks = 2 seconds buffer after last movement
+const IDLE_MOVEMENT_THRESHOLD: u64 = 40;
 
 /// Get projectile speed for a weapon type (units per second)
 fn get_projectile_speed(weapon_tag: &str) -> f32 {
@@ -73,6 +81,16 @@ pub struct BattleSimulator {
     damage_queue: Vec<DamageEntry>,
     /// Track last tick when damage was dealt (for stalemate detection)
     last_combat_tick: u64,
+    
+    // ✅ NEW: Idle mode tracking
+    /// Last tick when movement was received from external source
+    last_movement_tick: u64,
+    /// Earliest time any weapon will be ready to fire (seconds since epoch)
+    next_weapon_ready_time: f64,
+    /// Whether battle is currently in idle mode
+    is_idle: bool,
+    /// Count of idle ticks (for logging)
+    idle_tick_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +108,9 @@ pub struct TickResult {
     pub tick: u64,
     #[serde(rename = "weaponsFired")]
     pub weapons_fired: Vec<WeaponFired>,
+    /// ✅ NEW: Whether this was an idle tick (minimal processing)
+    #[serde(rename = "isIdle")]
+    pub is_idle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +140,19 @@ pub struct DamagedUnit {
     pub shield: f32,
 }
 
+/// ✅ NEW: Idle state info for JS side
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdleInfo {
+    #[serde(rename = "isIdle")]
+    pub is_idle: bool,
+    #[serde(rename = "ticksSinceMovement")]
+    pub ticks_since_movement: u64,
+    #[serde(rename = "nextWeaponReadyTime")]
+    pub next_weapon_ready_time: f64,
+    #[serde(rename = "idleTickCount")]
+    pub idle_tick_count: u64,
+}
+
 impl BattleSimulator {
     pub fn new(units: Vec<BattleUnit>) -> Self {
         let ships = units.iter().filter(|u| u.is_ship).count();
@@ -135,7 +169,114 @@ impl BattleSimulator {
             tick: 0,
             damage_queue: Vec::new(),
             last_combat_tick: 0,
+            // ✅ NEW: Initialize idle tracking
+            last_movement_tick: 0,
+            next_weapon_ready_time: 0.0,
+            is_idle: false,
+            idle_tick_count: 0,
         }
+    }
+
+    // =========================================================================
+    // ✅ NEW: Idle mode methods
+    // =========================================================================
+
+    /// Check if any weapon is ready to fire
+    fn any_weapon_ready(&self, current_time: f64) -> bool {
+        for unit in &self.units {
+            if !unit.alive || !unit.has_weapons || unit.target_id.is_none() {
+                continue;
+            }
+            
+            for weapon in &unit.weapons {
+                let time_since_fired = current_time - weapon.last_fired;
+                if time_since_fired >= weapon.cooldown as f64 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Calculate when the next weapon will be ready to fire
+    fn calculate_next_weapon_ready_time(&self, current_time: f64) -> f64 {
+        let mut earliest: f64 = f64::MAX;
+        
+        for unit in &self.units {
+            if !unit.alive || !unit.has_weapons || unit.target_id.is_none() {
+                continue;
+            }
+            
+            for weapon in &unit.weapons {
+                let ready_time = weapon.last_fired + weapon.cooldown as f64;
+                if ready_time < earliest {
+                    earliest = ready_time;
+                }
+            }
+        }
+        
+        if earliest == f64::MAX {
+            current_time + 1.0 // Default to 1 second if no weapons
+        } else {
+            earliest
+        }
+    }
+
+    /// Check if battle should be in idle mode
+    fn should_be_idle(&self, current_time: f64) -> bool {
+        // Not idle if recent movement
+        let ticks_since_movement = self.tick.saturating_sub(self.last_movement_tick);
+        if ticks_since_movement < IDLE_MOVEMENT_THRESHOLD {
+            return false;
+        }
+        
+        // Not idle if any weapon is ready to fire
+        if self.any_weapon_ready(current_time) {
+            return false;
+        }
+        
+        // Not idle if no units have targets (need to do targeting)
+        let units_with_targets = self.units.iter()
+            .filter(|u| u.alive && u.has_weapons && u.target_id.is_some())
+            .count();
+        if units_with_targets == 0 {
+            // Need to do targeting - not idle
+            return false;
+        }
+        
+        true
+    }
+
+    /// Perform minimal idle tick - only shield regen
+    fn do_idle_tick(&mut self, dt: f32) {
+        self.idle_tick_count += 1;
+        
+        // Only do shield regen
+        for unit in self.units.iter_mut() {
+            if unit.alive {
+                unit.regen_shield(dt);
+            }
+        }
+    }
+
+    /// Get current idle state info
+    pub fn get_idle_info(&self, current_time: f64) -> IdleInfo {
+        IdleInfo {
+            is_idle: self.is_idle,
+            ticks_since_movement: self.tick.saturating_sub(self.last_movement_tick),
+            next_weapon_ready_time: self.next_weapon_ready_time,
+            idle_tick_count: self.idle_tick_count,
+        }
+    }
+
+    /// Check if currently idle
+    pub fn is_currently_idle(&self) -> bool {
+        self.is_idle
+    }
+
+    /// Get next weapon ready time
+    pub fn get_next_weapon_ready_time(&self) -> f64 {
+        self.next_weapon_ready_time
     }
 
     // =========================================================================
@@ -156,6 +297,16 @@ impl BattleSimulator {
         // Rebuild spatial grid after position updates
         if count > 0 {
             self.rebuild_spatial_grid();
+            // ✅ NEW: Wake from idle on movement
+            self.last_movement_tick = self.tick;
+            self.is_idle = false;
+            
+            if self.idle_tick_count > 0 {
+                log(&format!(
+                    "[Idle] WAKING from idle after {} idle ticks - {} positions updated",
+                    self.idle_tick_count, count
+                ));
+            }
         }
         
         count
@@ -227,6 +378,9 @@ impl BattleSimulator {
         
         log(&format!("[Retarget] Cleared {} unit targets, will re-acquire next tick", changed));
         
+        // ✅ NEW: Wake from idle when forcing retarget
+        self.is_idle = false;
+        
         changed
     }
 
@@ -234,6 +388,8 @@ impl BattleSimulator {
     pub fn force_retarget_unit(&mut self, unit_id: u32) -> bool {
         if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit_id && u.alive) {
             unit.target_id = None;
+            // ✅ NEW: Wake from idle
+            self.is_idle = false;
             true
         } else {
             false
@@ -317,6 +473,55 @@ impl BattleSimulator {
     /// Main simulation tick
     pub fn simulate_tick(&mut self, dt: f32, current_time: f64) -> TickResult {
         self.tick += 1;
+
+        // ✅ NEW: Check if we should be in idle mode
+        let should_idle = self.should_be_idle(current_time);
+        
+        if should_idle {
+            // IDLE MODE - minimal processing
+            if !self.is_idle {
+                // Just entered idle mode
+                self.is_idle = true;
+                self.idle_tick_count = 0;
+                log(&format!(
+                    "[Idle] ENTERING idle mode at tick {} - no movement for {} ticks, next weapon ready at {:.2}",
+                    self.tick, 
+                    self.tick.saturating_sub(self.last_movement_tick),
+                    self.next_weapon_ready_time
+                ));
+            }
+            
+            self.do_idle_tick(dt);
+            
+            // Log idle status periodically (every 5 seconds = 100 ticks)
+            if self.tick % 100 == 0 {
+                log(&format!(
+                    "[Idle] Tick {}: idle for {} ticks, next weapon ready in {:.1}s",
+                    self.tick,
+                    self.idle_tick_count,
+                    (self.next_weapon_ready_time - current_time).max(0.0)
+                ));
+            }
+            
+            return TickResult {
+                moved: vec![],
+                damaged: vec![],
+                destroyed: vec![],
+                tick: self.tick,
+                weapons_fired: vec![],
+                is_idle: true,
+            };
+        }
+
+        // ✅ NEW: Exiting idle mode
+        if self.is_idle {
+            log(&format!(
+                "[Idle] EXITING idle mode at tick {} after {} idle ticks",
+                self.tick, self.idle_tick_count
+            ));
+            self.is_idle = false;
+            self.idle_tick_count = 0;
+        }
 
         // DEBUG: Log tick start (every 20 ticks = ~1 second)
         if self.tick % 20 == 0 {
@@ -542,6 +747,9 @@ impl BattleSimulator {
             self.last_combat_tick = self.tick;
         }
 
+        // ✅ NEW: Update next weapon ready time for idle mode calculation
+        self.next_weapon_ready_time = self.calculate_next_weapon_ready_time(current_time);
+
         // 8. Build result
         TickResult {
             moved,
@@ -549,6 +757,7 @@ impl BattleSimulator {
             destroyed,
             tick: self.tick,
             weapons_fired,
+            is_idle: false,
         }
     }
 
@@ -562,6 +771,8 @@ impl BattleSimulator {
             unit.id, unit.faction_id, unit.is_ship, unit.is_station
         ));
         self.units.push(unit);
+        // ✅ NEW: Wake from idle when adding units
+        self.is_idle = false;
     }
 
     pub fn get_active_factions(&self) -> Vec<u32> {

@@ -9,6 +9,11 @@
  * 2. Added forceRetarget() - trigger target re-evaluation
  * 3. Position updates trigger automatic re-targeting if movement is significant
  * 4. All units now auto-move toward targets (supports offline player combat)
+ * 5. ✅ NEW: IDLE MODE - Skips ticks entirely when no movement and weapons on cooldown
+ *    - Tracks idle state per battle
+ *    - When idle: skips calling simulate_tick() until wake condition met
+ *    - Wakes on: position update, weapon ready, or periodic check
+ *    - Reduces server load by ~90% during standoffs
  */
 
 const { WasmBattleSimulator } = require('./battle-core/pkg/battle_core.js');
@@ -19,6 +24,9 @@ class BattleManager {
     this.battles = new Map(); // battleId -> BattleInstance
     this.tickInterval = null;
     this.TICK_RATE_MS = 50; // 20 ticks per second
+    
+    // ✅ NEW: Idle mode configuration
+    this.IDLE_CHECK_INTERVAL_MS = 500; // Check idle battles every 500ms (2/sec)
     
     // Track pending position updates per battle
     this.pendingPositionUpdates = new Map(); // battleId -> Map<unitId, {x,y,z}>
@@ -59,7 +67,12 @@ class BattleManager {
         units: units.map(u => u.id),
         factions: [...new Set(units.map(u => u.faction_id))],
         ended: false,
-        results: null
+        results: null,
+        // ✅ NEW: Idle tracking
+        isIdle: false,
+        idleTickCount: 0,
+        nextWeaponReadyTime: 0,
+        lastIdleCheckTime: 0
       };
 
       this.battles.set(battleId, battle);
@@ -91,6 +104,7 @@ class BattleManager {
 
   /**
    * ✅ NEW: Update unit positions from external source (player movement)
+   * This WAKES the battle from idle mode
    * 
    * @param {string} battleId - Battle identifier
    * @param {Array} positionUpdates - Array of {id, x, y, z, clearTarget?}
@@ -103,6 +117,12 @@ class BattleManager {
     }
 
     try {
+      // ✅ Wake from idle on position update
+      if (battle.isIdle) {
+        console.log(`[BattleManager] Battle ${battleId} WAKING from idle - position update received`);
+        battle.isIdle = false;
+      }
+
       // Convert to JSON and pass to WASM
       const updatesJson = JSON.stringify(positionUpdates);
       const updatedCount = battle.simulator.update_unit_positions(updatesJson);
@@ -118,6 +138,7 @@ class BattleManager {
 
   /**
    * ✅ NEW: Update a single unit's position
+   * This WAKES the battle from idle mode
    * 
    * @param {string} battleId - Battle identifier
    * @param {number} unitId - Unit to update
@@ -133,6 +154,12 @@ class BattleManager {
     }
 
     try {
+      // ✅ Wake from idle on position update
+      if (battle.isIdle) {
+        console.log(`[BattleManager] Battle ${battleId} WAKING from idle - single position update`);
+        battle.isIdle = false;
+      }
+
       const result = battle.simulator.update_single_unit_position(unitId, x, y, z, clearTarget);
       return { success: result };
     } catch (error) {
@@ -156,6 +183,13 @@ class BattleManager {
     if (!pending) return false;
     
     pending.set(unitId, { id: unitId, x, y, z, clear_target: false });
+    
+    // ✅ Wake from idle if we have queued updates
+    const battle = this.battles.get(battleId);
+    if (battle?.isIdle) {
+      battle.isIdle = false;
+    }
+    
     return true;
   }
 
@@ -175,6 +209,7 @@ class BattleManager {
 
   /**
    * ✅ NEW: Force all units in a battle to re-evaluate their targets
+   * This WAKES the battle from idle mode
    */
   forceRetarget(battleId) {
     const battle = this.battles.get(battleId);
@@ -183,6 +218,11 @@ class BattleManager {
     }
 
     try {
+      // ✅ Wake from idle
+      if (battle.isIdle) {
+        battle.isIdle = false;
+      }
+
       const count = battle.simulator.force_retarget();
       console.log(`[BattleManager] Forced ${count} units to retarget in battle ${battleId}`);
       return { success: true, retargeted: count };
@@ -243,23 +283,68 @@ class BattleManager {
    */
   processTick() {
     const now = Date.now();
+    const currentTimeSec = now / 1000;
 
     for (const [battleId, battle] of this.battles.entries()) {
       if (battle.ended) continue;
 
       try {
-        // ✅ Process any pending position updates before the tick
-        this.processPendingPositionUpdates(battleId);
+        // ✅ Check for pending position updates (this wakes from idle)
+        const pendingCount = this.processPendingPositionUpdates(battleId);
+
+        // ✅ NEW: IDLE MODE OPTIMIZATION
+        // Check if battle is idle and should skip this tick
+        if (battle.isIdle) {
+          // Only do periodic checks while idle (every 500ms instead of every 50ms)
+          const timeSinceIdleCheck = now - battle.lastIdleCheckTime;
+          if (timeSinceIdleCheck < this.IDLE_CHECK_INTERVAL_MS) {
+            continue; // Skip this tick entirely
+          }
+          
+          battle.lastIdleCheckTime = now;
+
+          // Check if weapon is ready (time to wake up)
+          if (currentTimeSec >= battle.nextWeaponReadyTime) {
+            console.log(`[BattleManager] Battle ${battleId} WAKING - weapon cooldown expired`);
+            battle.isIdle = false;
+          } else {
+            // Still idle - just log periodically
+            battle.idleTickCount++;
+            if (battle.idleTickCount % 10 === 0) { // Every 5 seconds (10 * 500ms)
+              const timeToWeapon = (battle.nextWeaponReadyTime - currentTimeSec).toFixed(1);
+              console.log(`[BattleManager] Battle ${battleId} IDLE: ${battle.idleTickCount} checks, weapon ready in ${timeToWeapon}s`);
+            }
+            continue; // Skip this tick
+          }
+        }
 
         // Calculate delta time
         const dt = (now - battle.lastTickTime) / 1000;
         battle.lastTickTime = now;
 
         // Run simulation tick
-        const resultJson = battle.simulator.simulate_tick(dt, now / 1000);
+        const resultJson = battle.simulator.simulate_tick(dt, currentTimeSec);
         const tickResult = JSON.parse(resultJson);
 
         battle.tick++;
+
+        // ✅ NEW: Update idle state from tick result
+        if (tickResult.isIdle) {
+          if (!battle.isIdle) {
+            // Just entered idle mode
+            battle.isIdle = true;
+            battle.idleTickCount = 0;
+            battle.lastIdleCheckTime = now;
+            
+            // Get next weapon ready time from WASM
+            battle.nextWeaponReadyTime = battle.simulator.get_next_weapon_ready_time();
+            
+            const timeToWeapon = (battle.nextWeaponReadyTime - currentTimeSec).toFixed(1);
+            console.log(`[BattleManager] Battle ${battleId} entering IDLE mode - next weapon in ${timeToWeapon}s`);
+          }
+          // Skip emitting for idle ticks (nothing happened)
+          continue;
+        }
 
         // DEBUG logging
         if (tickResult.weaponsFired?.length > 0) {
@@ -267,6 +352,9 @@ class BattleManager {
           for (const wf of tickResult.weaponsFired.slice(0, 3)) {
             console.log(`  -> Attacker ${wf.attackerId} fired ${wf.weaponType} at Target ${wf.targetId}`);
           }
+          
+          // ✅ Update next weapon ready time after weapons fire
+          battle.nextWeaponReadyTime = battle.simulator.get_next_weapon_ready_time();
         }
         if (tickResult.destroyed?.length > 0) {
           console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.destroyed.length} units DESTROYED: ${tickResult.destroyed.join(', ')}`);
@@ -364,6 +452,7 @@ class BattleManager {
 
   /**
    * Add reinforcements to an existing battle
+   * This WAKES the battle from idle mode
    */
   addReinforcements(battleId, units) {
     const battle = this.battles.get(battleId);
@@ -372,6 +461,11 @@ class BattleManager {
     }
 
     try {
+      // ✅ Wake from idle
+      if (battle.isIdle) {
+        battle.isIdle = false;
+      }
+
       for (const unit of units) {
         const unitJson = JSON.stringify(unit);
         battle.simulator.add_unit(unitJson);
@@ -415,6 +509,9 @@ class BattleManager {
         duration: Date.now() - battle.startTime,
         activeFactions,
         ended: battle.ended,
+        // ✅ NEW: Include idle info
+        isIdle: battle.isIdle,
+        idleTickCount: battle.idleTickCount,
         units: JSON.parse(positions)
       };
     } catch (error) {
@@ -433,7 +530,10 @@ class BattleManager {
         systemId: b.systemId,
         tick: b.tick,
         duration: Date.now() - b.startTime,
-        unitCount: b.units.length
+        unitCount: b.units.length,
+        // ✅ NEW: Include idle info
+        isIdle: b.isIdle,
+        idleTickCount: b.idleTickCount
       }));
   }
 
