@@ -1,6 +1,6 @@
 # Plan: $ARGUMENTS
 
-**This command implements the workflow defined in `RULES.md`.** In case of conflict, RULES.md wins.
+**This command implements the workflow defined in `RULES.md`.** In case of conflict, RULES.md wins. 
 
 ---
 
