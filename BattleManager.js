@@ -4,12 +4,16 @@
  * Manages battle lifecycle using Rust WASM battle core
  * Handles tick loops, unit updates, and result persistence
  * 
- * ✅ UPDATES:
- * 1. Added updateUnitPositions() - sync external position changes to WASM
- * 2. Added forceRetarget() - trigger target re-evaluation
- * 3. Position updates trigger automatic re-targeting if movement is significant
- * 4. ✅ IDLE MODE - Skips ticks entirely when no movement and weapons on cooldown
- * 5. ✅ REDUCED LOGGING - Only summary logs every 5 seconds to reduce console spam
+ * ✅ CRITICAL FIXES:
+ * 1. Added MAX_BATTLE_DURATION_MS (30 min) - absolute battle timeout
+ * 2. Added STALEMATE_REAL_TIME_MS (5 min) - real time stalemate detection
+ * 3. Added lastDamageTime tracking - tracks last combat activity by real time
+ * 4. Added periodic timeout check in processTick()
+ * 5. IDLE mode no longer prevents timeout detection
+ * 6. Added updateUnitPositions() - sync external position changes to WASM
+ * 7. Added forceRetarget() - trigger target re-evaluation
+ * 8. Position updates trigger automatic re-targeting if movement is significant
+ * 9. REDUCED LOGGING - Only summary logs every 5 seconds to reduce console spam
  */
 
 const { WasmBattleSimulator } = require('./battle-core/pkg/battle_core.js');
@@ -21,13 +25,28 @@ class BattleManager {
     this.tickInterval = null;
     this.TICK_RATE_MS = 50; // 20 ticks per second
     
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ CRITICAL TIMEOUT CONFIGURATION
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // Maximum battle duration (30 minutes) - ABSOLUTE LIMIT regardless of activity
+    this.MAX_BATTLE_DURATION_MS = 30 * 60 * 1000;
+    
+    // Stalemate timeout (5 minutes) - end battle if no damage dealt for this long
+    this.STALEMATE_REAL_TIME_MS = 5 * 60 * 1000;
+    
+    // How often to check timeouts (every 10 seconds)
+    this.TIMEOUT_CHECK_INTERVAL_MS = 10 * 1000;
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    
     // Idle mode configuration
     this.IDLE_CHECK_INTERVAL_MS = 500;
     
     // Track pending position updates per battle
     this.pendingPositionUpdates = new Map();
     
-    // ✅ NEW: Logging configuration
+    // Logging configuration
     this.LOG_SUMMARY_INTERVAL_TICKS = 100; // Log summary every 100 ticks (5 seconds)
     this.LOG_WEAPON_FIRES = false; // Set to true to see individual weapon fires
     this.LOG_DESTROYED_UNITS = true; // Always log unit destruction
@@ -38,10 +57,14 @@ class BattleManager {
    */
   startBattle(battleId, systemId, units) {
     try {
+      const now = Date.now();
+      
       console.log(`[BattleManager] ═══════════════════════════════════════════`);
       console.log(`[BattleManager] Starting battle ${battleId}`);
       console.log(`[BattleManager]   System: ${systemId}`);
       console.log(`[BattleManager]   Units: ${units.length}`);
+      console.log(`[BattleManager]   Max Duration: ${this.MAX_BATTLE_DURATION_MS / 60000} minutes`);
+      console.log(`[BattleManager]   Stalemate Timeout: ${this.STALEMATE_REAL_TIME_MS / 60000} minutes`);
 
       // Summary stats
       const factions = [...new Set(units.map(u => u.faction_id))];
@@ -56,7 +79,7 @@ class BattleManager {
 
       // Create WASM simulator
       const unitsJson = JSON.stringify(units);
-      const currentTimeSec = Date.now() / 1000;
+      const currentTimeSec = now / 1000;
       const simulator = new WasmBattleSimulator(unitsJson, currentTimeSec);
 
       // Store battle instance
@@ -65,18 +88,24 @@ class BattleManager {
         systemId,
         simulator,
         tick: 0,
-        startTime: Date.now(),
-        lastTickTime: Date.now(),
+        startTime: now,
+        lastTickTime: now,
         units: units.map(u => u.id),
         factions: factions,
         ended: false,
         results: null,
+        
         // Idle tracking
         isIdle: false,
         idleTickCount: 0,
         nextWeaponReadyTime: 0,
         lastIdleCheckTime: 0,
-        // ✅ NEW: Stats tracking for summary logs
+        
+        // ✅ NEW: Timeout tracking (using REAL TIME, not ticks!)
+        lastDamageTime: now,      // Last time damage was dealt
+        lastTimeoutCheck: now,    // Last time we checked for timeout
+        
+        // Stats tracking for summary logs
         stats: {
           totalWeaponsFired: 0,
           totalDamageEvents: 0,
@@ -137,6 +166,29 @@ class BattleManager {
   }
 
   /**
+   * ✅ NEW: Check if a battle should be force-ended due to timeout
+   * Returns: null if OK, or reason string if should end
+   */
+  checkBattleTimeout(battle, now) {
+    const runningTime = now - battle.startTime;
+    const timeSinceLastDamage = now - battle.lastDamageTime;
+    
+    // Check absolute max duration
+    if (runningTime > this.MAX_BATTLE_DURATION_MS) {
+      const minutes = Math.round(runningTime / 60000);
+      return `max_duration_exceeded_${minutes}m`;
+    }
+    
+    // Check stalemate (no damage for too long)
+    if (timeSinceLastDamage > this.STALEMATE_REAL_TIME_MS) {
+      const minutes = Math.round(timeSinceLastDamage / 60000);
+      return `stalemate_no_damage_${minutes}m`;
+    }
+    
+    return null; // Battle is OK
+  }
+
+  /**
    * Process one tick for all active battles
    */
   processTick() {
@@ -147,6 +199,28 @@ class BattleManager {
       if (battle.ended) continue;
 
       try {
+        // ═══════════════════════════════════════════════════════════════════
+        // ✅ CRITICAL: Timeout check runs REGARDLESS of idle state
+        // ═══════════════════════════════════════════════════════════════════
+        if (now - battle.lastTimeoutCheck >= this.TIMEOUT_CHECK_INTERVAL_MS) {
+          battle.lastTimeoutCheck = now;
+          
+          const timeoutReason = this.checkBattleTimeout(battle, now);
+          if (timeoutReason) {
+            console.warn(`[BattleManager] ⚠️ Battle ${battleId} FORCE ENDING: ${timeoutReason}`);
+            this.endBattle(battleId, new Error(timeoutReason));
+            continue;
+          }
+          
+          // Log status every minute
+          const runningMinutes = Math.floor((now - battle.startTime) / 60000);
+          const staleMins = Math.floor((now - battle.lastDamageTime) / 60000);
+          if (runningMinutes > 0 && runningMinutes % 1 === 0 && battle.tick % 200 === 0) {
+            console.log(`[Battle ${battleId}] Running ${runningMinutes}m, last damage ${staleMins}m ago, tick ${battle.tick}`);
+          }
+        }
+        // ═══════════════════════════════════════════════════════════════════
+
         // Check idle mode
         if (battle.isIdle) {
           if (!battle.lastIdleCheckTime) {
@@ -164,6 +238,7 @@ class BattleManager {
             battle.isIdle = false;
           } else {
             battle.idleTickCount++;
+
             // Log idle status every 10 seconds
             if (battle.idleTickCount % 20 === 0) {
               const timeToWeapon = (battle.nextWeaponReadyTime - currentTimeSec).toFixed(1);
@@ -184,9 +259,18 @@ class BattleManager {
         battle.tick++;
 
         // Update stats
-        battle.stats.totalWeaponsFired += tickResult.weaponsFired?.length || 0;
-        battle.stats.totalDamageEvents += tickResult.damaged?.length || 0;
-        battle.stats.totalDestroyed += tickResult.destroyed?.length || 0;
+        const weaponsFiredCount = tickResult.weaponsFired?.length || 0;
+        const damageCount = tickResult.damaged?.length || 0;
+        const destroyedCount = tickResult.destroyed?.length || 0;
+        
+        battle.stats.totalWeaponsFired += weaponsFiredCount;
+        battle.stats.totalDamageEvents += damageCount;
+        battle.stats.totalDestroyed += destroyedCount;
+
+        // ✅ CRITICAL: Update lastDamageTime when damage occurs
+        if (damageCount > 0 || destroyedCount > 0) {
+          battle.lastDamageTime = now;
+        }
 
         // Check for idle mode transition
         if (tickResult.isIdle) {
@@ -201,29 +285,28 @@ class BattleManager {
           continue;
         }
 
-        // ✅ REDUCED LOGGING: Only log individual weapon fires if enabled
-        if (this.LOG_WEAPON_FIRES && tickResult.weaponsFired?.length > 0) {
-          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${tickResult.weaponsFired.length} weapons fired`);
+        // Reduced logging: Only log individual weapon fires if enabled
+        if (this.LOG_WEAPON_FIRES && weaponsFiredCount > 0) {
+          console.log(`[Battle ${battleId}] Tick ${battle.tick}: ${weaponsFiredCount} weapons fired`);
         }
 
         // Always log destroyed units (important events)
-        if (this.LOG_DESTROYED_UNITS && tickResult.destroyed?.length > 0) {
-          console.log(`[Battle ${battleId}] 💀 ${tickResult.destroyed.length} units DESTROYED: ${tickResult.destroyed.join(', ')}`);
+        if (this.LOG_DESTROYED_UNITS && destroyedCount > 0) {
+          console.log(`[Battle ${battleId}] 💀 ${destroyedCount} units DESTROYED: ${tickResult.destroyed.join(', ')}`);
         }
 
         // Update next weapon ready time after weapons fire
-        if (tickResult.weaponsFired?.length > 0) {
+        if (weaponsFiredCount > 0) {
           battle.nextWeaponReadyTime = battle.simulator.get_next_weapon_ready_time();
         }
 
-        // ✅ REDUCED LOGGING: Summary log every 5 seconds (100 ticks)
+        // Summary log every 5 seconds (100 ticks)
         if (battle.tick % this.LOG_SUMMARY_INTERVAL_TICKS === 0) {
-          const ticksSinceLastSummary = battle.tick - battle.stats.lastSummaryTick;
-          const weaponsSinceLastSummary = battle.stats.totalWeaponsFired;
           const elapsed = Math.floor((now - battle.startTime) / 1000);
+          const staleSecs = Math.floor((now - battle.lastDamageTime) / 1000);
           
           console.log(`[Battle ${battleId}] ──── ${elapsed}s Summary ────`);
-          console.log(`  Tick: ${battle.tick} | Weapons Fired: ${battle.stats.totalWeaponsFired} | Damage Events: ${battle.stats.totalDamageEvents} | Destroyed: ${battle.stats.totalDestroyed}`);
+          console.log(`  Tick: ${battle.tick} | Weapons: ${battle.stats.totalWeaponsFired} | Damage: ${battle.stats.totalDamageEvents} | Destroyed: ${battle.stats.totalDestroyed} | Stale: ${staleSecs}s`);
           
           battle.stats.lastSummaryTick = battle.tick;
         }
@@ -239,7 +322,7 @@ class BattleManager {
           weaponsFired: tickResult.weaponsFired || []
         });
 
-        // Check if battle ended
+        // Check if battle ended (via WASM)
         if (battle.simulator.is_battle_ended()) {
           this.endBattle(battleId);
         }
@@ -307,6 +390,16 @@ class BattleManager {
   }
 
   /**
+   * Queue position update for batched processing
+   */
+  queuePositionUpdate(battleId, unitId, x, y, z) {
+    const pending = this.pendingPositionUpdates.get(battleId);
+    if (!pending) return;
+    
+    pending.set(unitId, { id: unitId, x, y, z });
+  }
+
+  /**
    * Force units to re-evaluate targets
    */
   forceRetarget(battleId) {
@@ -324,11 +417,34 @@ class BattleManager {
   }
 
   /**
+   * Get current unit positions (for debugging)
+   */
+  getUnitPositions(battleId) {
+    const battle = this.battles.get(battleId);
+    if (!battle || battle.ended) {
+      return { success: false, error: 'Battle not found or ended' };
+    }
+
+    try {
+      const positionsJson = battle.simulator.get_unit_positions();
+      return { success: true, positions: JSON.parse(positionsJson) };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * End a battle and get final results
    */
   endBattle(battleId, error = null) {
     const battle = this.battles.get(battleId);
     if (!battle) return;
+
+    // Prevent double-ending
+    if (battle.ended) {
+      console.log(`[BattleManager] Battle ${battleId} already ended, skipping`);
+      return;
+    }
 
     try {
       const duration = Date.now() - battle.startTime;
@@ -341,6 +457,9 @@ class BattleManager {
       console.log(`[BattleManager]   Weapons Fired: ${battle.stats.totalWeaponsFired}`);
       console.log(`[BattleManager]   Damage Events: ${battle.stats.totalDamageEvents}`);
       console.log(`[BattleManager]   Units Destroyed: ${battle.stats.totalDestroyed}`);
+      if (error) {
+        console.log(`[BattleManager]   End Reason: ${error.message || error}`);
+      }
 
       const resultsJson = battle.simulator.get_results();
       const finalUnits = JSON.parse(resultsJson);
@@ -362,7 +481,7 @@ class BattleManager {
         totalTicks: battle.tick,
         activeFactions,
         units: finalUnits,
-        error: error ? error.message : null
+        error: error ? (error.message || String(error)) : null
       };
 
       // Emit battle ended event
@@ -373,7 +492,8 @@ class BattleManager {
         totalTicks: battle.tick,
         survivors: survivors.map(u => u.id),
         casualties: casualties.map(u => u.id),
-        victor: activeFactions.length === 1 ? activeFactions[0] : null
+        victor: activeFactions.length === 1 ? activeFactions[0] : null,
+        reason: error ? (error.message || String(error)) : 'completed'
       });
 
       // Keep battle in memory for 60 seconds for result queries
@@ -427,9 +547,6 @@ class BattleManager {
         battle.units.push(unit.id);
       }
 
-      // Wake from idle
-      battle.isIdle = false;
-
       // Emit reinforcements event
       this.io.to(`system:${battle.systemId}`).emit('battle:reinforcements', {
         battleId,
@@ -458,16 +575,17 @@ class BattleManager {
       return { found: false };
     }
 
+    const now = Date.now();
     return {
       found: true,
       battleId: battle.battleId,
       systemId: battle.systemId,
       tick: battle.tick,
-      duration: Date.now() - battle.startTime,
+      duration: now - battle.startTime,
+      timeSinceLastDamage: now - battle.lastDamageTime,
       ended: battle.ended,
       unitCount: battle.units.length,
       factions: battle.factions,
-      isIdle: battle.isIdle,
       stats: battle.stats,
       results: battle.results
     };
@@ -477,53 +595,55 @@ class BattleManager {
    * Get all active battles
    */
   getActiveBattles() {
-    const battles = [];
+    const active = [];
+    const now = Date.now();
+    
     for (const [battleId, battle] of this.battles.entries()) {
       if (!battle.ended) {
-        battles.push({
+        active.push({
           battleId,
           systemId: battle.systemId,
           tick: battle.tick,
-          duration: Date.now() - battle.startTime,
+          duration: now - battle.startTime,
+          timeSinceLastDamage: now - battle.lastDamageTime,
           unitCount: battle.units.length,
           factions: battle.factions,
-          isIdle: battle.isIdle
+          isIdle: battle.isIdle,
+          stats: battle.stats
         });
       }
     }
-    return battles;
+    return active;
   }
 
   /**
    * Force stop a battle
    */
-  stopBattle(battleId, reason = 'forced_stop') {
+  stopBattle(battleId, reason = 'force_stopped') {
     const battle = this.battles.get(battleId);
     if (!battle) {
       return { success: false, error: 'Battle not found' };
     }
 
-    console.log(`[BattleManager] Force stopping battle ${battleId}: ${reason}`);
     this.endBattle(battleId, new Error(reason));
     return { success: true };
   }
 
   /**
-   * Get current unit positions for a battle
+   * Shutdown - clean up all battles
    */
-  getUnitPositions(battleId) {
-    const battle = this.battles.get(battleId);
-    if (!battle || battle.ended) {
-      return { success: false, error: 'Battle not found or ended' };
+  shutdown() {
+    console.log('[BattleManager] Shutting down...');
+    
+    this.stopTickLoop();
+    
+    for (const battleId of this.battles.keys()) {
+      this.endBattle(battleId, new Error('server_shutdown'));
     }
-
-    try {
-      const positionsJson = battle.simulator.get_unit_positions();
-      const positions = JSON.parse(positionsJson);
-      return { success: true, positions };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
+    
+    this.battles.clear();
+    this.pendingPositionUpdates.clear();
+    console.log('[BattleManager] Shutdown complete');
   }
 }
 
