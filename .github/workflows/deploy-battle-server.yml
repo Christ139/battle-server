@@ -30,6 +30,12 @@ jobs:
             echo "=== Pulling latest code ==="
             git pull origin main
 
+            echo "=== Building WASM ==="
+            source "$HOME/.cargo/env"
+            cd battle-core
+            wasm-pack build --target nodejs --release
+            cd ..
+
             echo "=== Installing dependencies ==="
             # use ci if you like, fall back to install if package-lock changes often
             npm ci --omit=dev || npm install --omit=dev
@@ -37,10 +43,10 @@ jobs:
             echo "=== Checking PM2 process ==="
             if pm2 describe battle-server > /dev/null 2>&1; then
               echo "=== Reloading PM2 process ==="
-              pm2 reload battle-server --update-env
+              pm2 reload ecosystem.config.js --update-env
             else
               echo "=== Starting PM2 process for first time ==="
-              pm2 start server.js --name battle-server
+              pm2 start ecosystem.config.js
               pm2 save
             fi
 

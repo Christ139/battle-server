@@ -13,6 +13,10 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const BattleManager = require('./BattleManager');
+const { notifyDiscordStartup, setupCrashHandlers } = require('./discordWebhook');
+
+// Setup crash handlers early
+setupCrashHandlers();
 
 const app = express();
 const server = http.createServer(app);
@@ -225,4 +229,7 @@ server.listen(PORT, () => {
   console.log(`║  Engine:         Rust + WebAssembly${' '.repeat(20)} ║`);
   console.log(`║  Features:       Position Sync, Auto-Retarget${' '.repeat(9)} ║`);
   console.log(`╚══════════════════════════════════════════════════════════╝`);
+
+  // Send Discord notification
+  notifyDiscordStartup({ port: PORT, activeBattles: 0 });
 });
