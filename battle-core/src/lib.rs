@@ -46,13 +46,14 @@ pub struct WasmBattleSimulator {
 #[wasm_bindgen]
 impl WasmBattleSimulator {
     /// Create new simulator from JSON units
+    /// current_time should be Date.now() / 1000 (seconds since epoch)
     #[wasm_bindgen(constructor)]
-    pub fn new(units_json: &str) -> Result<WasmBattleSimulator, JsValue> {
+    pub fn new(units_json: &str, current_time: f64) -> Result<WasmBattleSimulator, JsValue> {
         let units: Vec<BattleUnit> = serde_json::from_str(units_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse units: {}", e)))?;
-        
+
         Ok(WasmBattleSimulator {
-            simulator: BattleSimulator::new(units),
+            simulator: BattleSimulator::new(units, current_time),
         })
     }
 
@@ -66,12 +67,13 @@ impl WasmBattleSimulator {
     }
 
     /// Add unit mid-battle - takes JSON
+    /// current_time should be Date.now() / 1000 (seconds since epoch)
     #[wasm_bindgen]
-    pub fn add_unit(&mut self, unit_json: &str) -> Result<(), JsValue> {
+    pub fn add_unit(&mut self, unit_json: &str, current_time: f64) -> Result<(), JsValue> {
         let unit: BattleUnit = serde_json::from_str(unit_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse unit: {}", e)))?;
-        
-        self.simulator.add_unit(unit);
+
+        self.simulator.add_unit(unit, current_time);
         Ok(())
     }
 

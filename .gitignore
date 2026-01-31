@@ -2,8 +2,6 @@ node_modules
 npm-debug.log
 .env
 
-.claude/
-CLAUDE.md
 
 # Rust build artifacts
 battle-core/target/

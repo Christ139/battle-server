@@ -7,6 +7,7 @@
 // 4. Added view_range for detection
 
 use serde::{Deserialize, Serialize};
+use getrandom::getrandom;
 
 /// Memory-optimized battle unit
 /// 
@@ -232,7 +233,30 @@ impl BattleUnit {
 
     /// Normalize unit data after deserialization
     /// Computes derived fields if they weren't sent by the game server
-    pub fn normalize(&mut self) {
+    pub fn normalize(&mut self, current_time: f64) {
+        // Randomize weapon cooldowns so ships don't all fire at the same time
+        for (i, weapon) in self.weapons.iter_mut().enumerate() {
+            if weapon.last_fired == 0.0 && weapon.cooldown > 0.0 {
+                // Get random bytes and convert to float 0.0-1.0
+                let mut buf = [0u8; 4];
+                if getrandom(&mut buf).is_ok() {
+                    let random_frac = (u32::from_le_bytes(buf) as f64) / (u32::MAX as f64);
+
+                    // Set last_fired to a random point in the past within cooldown period
+                    // This staggers when each weapon becomes ready
+                    weapon.last_fired = current_time - (random_frac * weapon.cooldown as f64);
+
+                    // Debug log for first few weapons
+                    if i < 3 {
+                        crate::log(&format!(
+                            "[Normalize] Unit {} weapon {} ({}): cooldown={:.1}s, random={:.2}, last_fired={:.2}",
+                            self.id, i, weapon.tag, weapon.cooldown, random_frac, weapon.last_fired
+                        ));
+                    }
+                }
+            }
+        }
+
         // Compute has_weapons from weapons array if not set
         if !self.has_weapons && !self.weapons.is_empty() {
             self.has_weapons = true;

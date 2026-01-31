@@ -52,9 +52,10 @@ class BattleManager {
       const factions = [...new Set(units.map(u => u.faction_id))];
       console.log(`  Total: ${units.length} units, ${unitsWithWeapons} with weapons, factions: ${factions.join(', ')}`);
 
-      // Create WASM simulator
+      // Create WASM simulator with current time for weapon cooldown randomization
       const unitsJson = JSON.stringify(units);
-      const simulator = new WasmBattleSimulator(unitsJson);
+      const currentTimeSec = Date.now() / 1000;
+      const simulator = new WasmBattleSimulator(unitsJson, currentTimeSec);
 
       // Store battle instance
       const battle = {
@@ -466,9 +467,10 @@ class BattleManager {
         battle.isIdle = false;
       }
 
+      const currentTimeSec = Date.now() / 1000;
       for (const unit of units) {
         const unitJson = JSON.stringify(unit);
-        battle.simulator.add_unit(unitJson);
+        battle.simulator.add_unit(unitJson, currentTimeSec);
         battle.units.push(unit.id);
       }
 

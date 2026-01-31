@@ -154,10 +154,10 @@ pub struct IdleInfo {
 }
 
 impl BattleSimulator {
-    pub fn new(mut units: Vec<BattleUnit>) -> Self {
-        // Normalize all units to compute derived fields
+    pub fn new(mut units: Vec<BattleUnit>, current_time: f64) -> Self {
+        // Normalize all units to compute derived fields and randomize weapon cooldowns
         for unit in units.iter_mut() {
-            unit.normalize();
+            unit.normalize(current_time);
         }
 
         let ships = units.iter().filter(|u| u.is_ship).count();
@@ -771,9 +771,9 @@ impl BattleSimulator {
     // Existing methods (required by lib.rs)
     // =========================================================================
 
-    pub fn add_unit(&mut self, mut unit: BattleUnit) {
-        // Normalize unit data
-        unit.normalize();
+    pub fn add_unit(&mut self, mut unit: BattleUnit, current_time: f64) {
+        // Normalize unit data and randomize weapon cooldowns
+        unit.normalize(current_time);
         log(&format!(
             "[Simulator] Adding unit {} (faction={}, ship={}, station={}, has_weapons={}, max_range={:.0})",
             unit.id, unit.faction_id, unit.is_ship, unit.is_station, unit.has_weapons, unit.max_weapon_range
