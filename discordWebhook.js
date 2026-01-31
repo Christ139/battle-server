@@ -17,27 +17,22 @@ function getGitInfo() {
 async function sendCrashNotification(error, type) {
   if (!WEBHOOK_URL) return;
 
+  const git = getGitInfo();
+
   try {
     await fetch(WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        content: '**BATTLE SERVER CRASH**',
         embeds: [{
-          title: `${type} Error`,
-          description: 'Battle server crashed and is restarting',
+          title: '💥 Battle Server Crashed',
           color: 15158332,
           fields: [
-            {
-              name: 'Error Message',
-              value: '```' + (error.message || 'Unknown error').substring(0, 1000) + '```'
-            },
-            {
-              name: 'Timestamp',
-              value: new Date().toLocaleString(),
-              inline: true
-            }
+            { name: '❌ Type', value: type, inline: true },
+            { name: '📦 Commit', value: `\`${git.commitHash}\``, inline: true },
+            { name: '💬 Error', value: '```' + (error.message || 'Unknown').substring(0, 200) + '```', inline: false }
           ],
+          footer: { text: 'Restarting...' },
           timestamp: new Date().toISOString()
         }]
       })
@@ -56,42 +51,21 @@ async function notifyDiscordStartup(serverInfo = {}) {
   const memoryUsedMB = (memoryUsage.heapUsed / 1024 / 1024).toFixed(2);
   const git = getGitInfo();
 
-  const fields = [
-    { name: 'Environment', value: process.env.NODE_ENV || 'development', inline: true },
-    { name: 'Port', value: `${serverInfo.port || 4100}`, inline: true },
-    { name: 'Memory', value: `${memoryUsedMB} MB`, inline: true },
-    { name: 'Branch', value: git.branch, inline: true },
-    { name: 'Commit', value: git.commitHash, inline: true },
-    { name: 'Author', value: git.author, inline: true },
-    { name: 'Commit Message', value: git.commitMessage.substring(0, 100), inline: false }
-  ];
-
-  if (serverInfo.activeBattles !== undefined) {
-    fields.push({ name: 'Active Battles', value: `${serverInfo.activeBattles}`, inline: true });
-  }
-
-  fields.push({
-    name: 'Server Time',
-    value: new Date().toLocaleString('en-US', {
-      timeZone: 'America/Chicago',
-      dateStyle: 'short',
-      timeStyle: 'medium'
-    }),
-    inline: false
-  });
-
   try {
     await fetch(WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        content: '**Battle Server Online**',
         embeds: [{
-          title: 'Battle Server Started',
-          description: 'Battle server is now running',
+          title: '🟢 Battle Server Online',
           color: 3066993,
-          fields: fields,
-          footer: { text: 'Battle Server' },
+          fields: [
+            { name: '📦 Commit', value: `\`${git.commitHash}\` on \`${git.branch}\``, inline: true },
+            { name: '👤 Author', value: git.author, inline: true },
+            { name: '🔌 Port', value: `${serverInfo.port || 4100}`, inline: true },
+            { name: '💬 Message', value: git.commitMessage.substring(0, 80), inline: false }
+          ],
+          footer: { text: `${process.env.NODE_ENV || 'development'} • ${memoryUsedMB} MB` },
           timestamp: new Date().toISOString()
         }]
       })
@@ -120,7 +94,41 @@ function setupCrashHandlers() {
   });
 }
 
+async function notifyDiscordShutdown(serverInfo = {}) {
+  if (!WEBHOOK_URL) return;
+
+  const git = getGitInfo();
+  const uptimeSeconds = process.uptime();
+  const uptimeFormatted = uptimeSeconds > 3600
+    ? `${(uptimeSeconds / 3600).toFixed(1)} hours`
+    : `${(uptimeSeconds / 60).toFixed(1)} minutes`;
+
+  try {
+    await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        embeds: [{
+          title: '🔴 Battle Server Offline',
+          color: 16776960,
+          fields: [
+            { name: '⚔️ Active Battles', value: `${serverInfo.activeBattles || 0}`, inline: true },
+            { name: '⏱️ Uptime', value: uptimeFormatted, inline: true },
+            { name: '📦 Commit', value: `\`${git.commitHash}\``, inline: true }
+          ],
+          footer: { text: 'Graceful shutdown' },
+          timestamp: new Date().toISOString()
+        }]
+      })
+    });
+    console.log('Discord shutdown notification sent');
+  } catch (error) {
+    console.error('Failed to send Discord notification:', error);
+  }
+}
+
 module.exports = {
   notifyDiscordStartup,
+  notifyDiscordShutdown,
   setupCrashHandlers
 };

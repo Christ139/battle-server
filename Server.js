@@ -13,7 +13,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const BattleManager = require('./BattleManager');
-const { notifyDiscordStartup, setupCrashHandlers } = require('./discordWebhook');
+const { notifyDiscordStartup, notifyDiscordShutdown, setupCrashHandlers } = require('./discordWebhook');
 
 // Setup crash handlers early
 setupCrashHandlers();
@@ -205,14 +205,18 @@ io.on('connection', (socket) => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('[Battle] Shutting down...');
+  const activeBattles = battleManager.getActiveBattles().length;
+  await notifyDiscordShutdown({ activeBattles });
   battleManager.shutdown();
   server.close(() => process.exit(0));
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('[Battle] Shutting down...');
+  const activeBattles = battleManager.getActiveBattles().length;
+  await notifyDiscordShutdown({ activeBattles });
   battleManager.shutdown();
   server.close(() => process.exit(0));
 });
