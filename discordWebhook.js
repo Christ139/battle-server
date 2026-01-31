@@ -26,13 +26,15 @@ async function sendCrashNotification(error, type) {
       body: JSON.stringify({
         embeds: [{
           title: '💥 Battle Server Crashed',
+          description: 'Server crashed and is restarting',
           color: 15158332,
           fields: [
-            { name: '❌ Type', value: type, inline: true },
-            { name: '📦 Commit', value: `\`${git.commitHash}\``, inline: true },
-            { name: '💬 Error', value: '```' + (error.message || 'Unknown').substring(0, 200) + '```', inline: false }
+            { name: 'Error Type', value: type, inline: true },
+            { name: 'Commit', value: `\`${git.commitHash}\``, inline: true },
+            { name: 'Branch', value: git.branch, inline: true },
+            { name: 'Error Message', value: '```' + (error.message || 'Unknown').substring(0, 500) + '```', inline: false }
           ],
-          footer: { text: 'Restarting...' },
+          footer: { text: 'Battle Server • Restarting...' },
           timestamp: new Date().toISOString()
         }]
       })
@@ -58,14 +60,19 @@ async function notifyDiscordStartup(serverInfo = {}) {
       body: JSON.stringify({
         embeds: [{
           title: '🟢 Battle Server Online',
+          description: 'Battle server is now running and accepting connections',
           color: 3066993,
           fields: [
-            { name: '📦 Commit', value: `\`${git.commitHash}\` on \`${git.branch}\``, inline: true },
-            { name: '👤 Author', value: git.author, inline: true },
-            { name: '🔌 Port', value: `${serverInfo.port || 4100}`, inline: true },
-            { name: '💬 Message', value: git.commitMessage.substring(0, 80), inline: false }
+            { name: 'Environment', value: process.env.NODE_ENV || 'development', inline: true },
+            { name: 'Port', value: `${serverInfo.port || 4100}`, inline: true },
+            { name: 'Memory', value: `${memoryUsedMB} MB`, inline: true },
+            { name: 'Branch', value: git.branch, inline: true },
+            { name: 'Commit', value: `\`${git.commitHash}\``, inline: true },
+            { name: 'Author', value: git.author, inline: true },
+            { name: 'Commit Message', value: git.commitMessage.substring(0, 100), inline: false },
+            { name: 'Server Time', value: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'short', timeStyle: 'medium' }), inline: false }
           ],
-          footer: { text: `${process.env.NODE_ENV || 'development'} • ${memoryUsedMB} MB` },
+          footer: { text: 'Battle Server' },
           timestamp: new Date().toISOString()
         }]
       })
@@ -110,13 +117,15 @@ async function notifyDiscordShutdown(serverInfo = {}) {
       body: JSON.stringify({
         embeds: [{
           title: '🔴 Battle Server Offline',
+          description: 'Server is shutting down gracefully',
           color: 16776960,
           fields: [
-            { name: '⚔️ Active Battles', value: `${serverInfo.activeBattles || 0}`, inline: true },
-            { name: '⏱️ Uptime', value: uptimeFormatted, inline: true },
-            { name: '📦 Commit', value: `\`${git.commitHash}\``, inline: true }
+            { name: 'Active Battles', value: `${serverInfo.activeBattles || 0}`, inline: true },
+            { name: 'Uptime', value: uptimeFormatted, inline: true },
+            { name: 'Commit', value: `\`${git.commitHash}\``, inline: true },
+            { name: 'Server Time', value: new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'short', timeStyle: 'medium' }), inline: false }
           ],
-          footer: { text: 'Graceful shutdown' },
+          footer: { text: 'Battle Server' },
           timestamp: new Date().toISOString()
         }]
       })

@@ -209,7 +209,7 @@ process.on('SIGTERM', async () => {
   console.log('[Battle] Shutting down...');
   const activeBattles = battleManager.getActiveBattles().length;
   await notifyDiscordShutdown({ activeBattles });
-  battleManager.shutdown();
+  battleManager.stopTickLoop();
   server.close(() => process.exit(0));
 });
 
@@ -217,7 +217,7 @@ process.on('SIGINT', async () => {
   console.log('[Battle] Shutting down...');
   const activeBattles = battleManager.getActiveBattles().length;
   await notifyDiscordShutdown({ activeBattles });
-  battleManager.shutdown();
+  battleManager.stopTickLoop();
   server.close(() => process.exit(0));
 });
 
